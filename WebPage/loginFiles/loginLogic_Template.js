@@ -23,3 +23,10 @@ const errorMessage = document.getElementById("error-message");
 const loginForm = document.getElementById("login-form");
 const emailInput = document.getElementById("email-input");
 const passwordInput = document.getElementById("password-input");
+
+// Check if user already logged-in then redirect automatically to control page
+onAuthStateChanged(auth, (user) => {
+    if(user) {
+        window.location.href = "../control.html";
+    }
+});
