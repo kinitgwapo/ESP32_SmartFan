@@ -27,3 +27,23 @@ const fanStatusSpan = document.getElementById("fan-status");
 const micButton = document.getElementById("mic-button");
 const transcriptDisplay = document.getElementById("transcript-display");
 const voiceError = document.getElementById("voice-error");
+
+// Redirect to login page if user is not logged-in
+onAuthStateChanged(auth, (user) => {
+    if(user) {
+        userEmailSpan.textContent = user.email;
+    } else {
+        window.location.href = "../login.html";
+    }
+});
+
+// Handle lougout button logic
+logoutButton.addEventListener("click", async () => {
+    try {
+        // If log out was successful, onAuthStateChanged redirects back to login page
+        await signOut(auth);
+    } catch(error) { // Else check error code
+        console.error("Error signing out:", error);
+    }
+});
+
