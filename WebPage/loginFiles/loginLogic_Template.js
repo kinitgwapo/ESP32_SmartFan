@@ -30,3 +30,36 @@ onAuthStateChanged(auth, (user) => {
         window.location.href = "../control.html";
     }
 });
+
+loginForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    errorMessage.textContent = "";
+
+    const email = emailInput.value;
+    const password = passwordInput.value;
+
+    try {
+        // If credentials correct, onAuthStateChanged redirects logged in user to control page
+        await signInWithEmailAndPassword(auth, email, password);
+    } catch(error) {
+        switch(error.code) {
+            case "auth/invalid-email":
+                errorMessage.textContent = "Invalid email format!";
+                break;
+            case "auth/user-not-found":
+            case "auth/wrong-password":
+            case "auth/invalid-credential":
+                errorMessage.textContent = "Incorrect email or password!";
+                break;
+            case "auth/too-many-requests":
+                errorMessage.textContent = "Multiple failed attempts! try again later.";
+                break;
+            case "auth/network-request-failed":
+                errorMessage.textContent = "Network error! check your connection.";
+                break;
+            default:
+                errorMessage.textContent = 'Error: ${error.message}';
+                break;
+        }
+    }
+});
