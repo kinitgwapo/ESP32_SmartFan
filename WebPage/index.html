@@ -8,14 +8,13 @@
   <link rel="stylesheet" href="style.css" />
   <script type="module" src="./script.js"></script>
 </head>
+
 <body>
   <main class="page-shell">
     <header class="page-header">
       <div class="fan-mark" aria-hidden="true">✣</div>
       <div>
-        <p class="eyebrow">VOICE + REMOTE CONTROL</p>
         <h1>Smart Fan</h1>
-        <p class="subtitle">Control your fan from this webpage.</p>
       </div>
     </header>
 
@@ -76,8 +75,7 @@
 
       <div class="panel-heading-row command-heading">
         <div>
-          <p class="eyebrow">CONTROL</p>
-          <h2>Choose a speed</h2>
+          <h2>MANUAL FAN SPEED CONTROL</h2>
         </div>
       </div>
       <div class="speed-grid">
@@ -98,12 +96,10 @@
     </section>
 
     <section class="panel voice-panel" aria-labelledby="voice-heading">
-      <div class="panel-heading-row">
+      <div class="panel-heading-row" style="justify-content: center;">
         <div>
-          <p class="eyebrow">HANDS-FREE</p>
-          <h2 id="voice-heading">Voice control</h2>
+          <h2 id="voice-heading">VOICE CONTROL</h2>
         </div>
-        <span class="voice-icon" aria-hidden="true">🎙</span>
       </div>
       <p class="muted">Tap the microphone, then say a command such as “fan off,” “low speed,” “normal speed,” or “high speed.”</p>
       <button id="voiceButton" class="button button-voice" type="button" disabled>Start listening</button>
@@ -113,11 +109,6 @@
       </div>
       <p id="voiceMessage" class="helper-text" aria-live="polite">Voice recognition support depends on your browser. Chrome or Edge on HTTPS is recommended.</p>
     </section>
-
-    <footer class="page-footer">
-      <p>Smart Fan Controller · Webpage prototype</p>
-      <p>Commands are requests; the displayed fan state changes only when the ESP32 reports a state.</p>
-    </footer>
   </main>
 </body>
 </html>
