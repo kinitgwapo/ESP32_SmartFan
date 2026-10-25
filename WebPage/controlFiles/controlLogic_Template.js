@@ -50,7 +50,7 @@ logoutButton.addEventListener("click", async () => {
 // Real-time Firebase Fan Status Listener (Reading from state/speed)
 const fanStateRef = ref(db, "state/speed");
 
-onValue(fanSateRef, (snapshot) => {
+onValue(fanStateRef, (snapshot) => {
     const currentSpeed = snapshot.val();
     if (currentSpeed) {
         fanStatusSpan.textContent = currentSpeed.toUpperCase();
@@ -58,3 +58,80 @@ onValue(fanSateRef, (snapshot) => {
         fanStatusSpan.textContent = "OFF";
     }
 });
+
+// Speech-to-Text Configuration & Writing to Command Path (fan/command)
+const fanCommandRef = ref(db, "fan/command");
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+//Compatibility Guard & Engine Configuration
+if (!SpeechRecognition) {
+    micButton.disabled = true;
+    voiceError.textContent = "Speech Recognition not supported in this browser. Use Chrome or Edge for best experience.";
+} else {
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+
+    // Triggering Microphone Recording
+    micButton.addEventListener("click", () => {
+        voiceError.textContent = "";
+        transcriptDisplay.textContent = "Listening...";
+        try {
+            recognition.start();
+        } catch (e) {
+            console.error(e);
+        }
+    });
+
+    // Extracting Spoken Text
+    recognition.onresult = async (event) => {
+        const speechToText = event.results[0][0].transcript.toLowerCase().trim();
+        transcriptDisplay.textContent = `"${speechToText}"`;
+
+        // Parsing Commands & Writing to Firebase
+        let targetSpeed = null;
+
+        // Check speech keywords against the 4 speed settings
+        if (speechToText.includes("high") || speechToText.includes("fast") || speechToText.includes("max")) {
+            targetSpeed = "high";
+        } else if (speechToText.includes("normal") || speechToText.includes("medium")) {
+            targetSpeed = "normal";
+        } else if (speechToText.includes("low") || speechToText.includes("slow")) {
+            targetSpeed = "low";
+        } else if (speechToText.includes("off") || speechToText.includes("stop")) {
+            targetSpeed = "off";
+        } else if (speechToText.includes("on") || speechToText.includes("start")) {
+            // Default generic "turn on" command to normal speed
+            targetSpeed = "normal";
+        }
+
+        // If a valid command was recognized, write to Firebase
+        if (targetSpeed) {
+            try {
+                // Update speed and new timestamp commandId under fan/command/
+                await set(fanCommandRef, {
+                    speed: targetSpeed,
+                    commandId: Date.now()
+                });
+            } catch (error) {
+                voiceError.textContent = "Failed to send command to Firebase.";
+            }
+        } else {
+            voiceError.textContent = "Command not recognized. Say 'low', 'normal', 'high', or 'turn off'.";
+        }
+    };
+
+    // Handle microphone errors
+    recognition.onerror = (event) => {
+        voiceError.textContent = `Voice recognition error: ${event.error}`;
+        transcriptDisplay.textContent = "Stopped listening.";
+    };
+
+    // Handle end of recognition
+    recognition.onend = () => {
+        if (transcriptDisplay.textContent === "Listening...") {
+            transcriptDisplay.textContent = "Stopped listening.";
+        }
+    };
+}
