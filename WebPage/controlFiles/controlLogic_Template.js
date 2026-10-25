@@ -19,3 +19,11 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getDatabase(app);
+
+// DOM element connected to control.html IDs
+const userEmailSpan = document.getElementById("user-email");
+const logoutButton = document.getElementById("logout-button");
+const fanStatusSpan = document.getElementById("fan-status");
+const micButton = document.getElementById("mic-button");
+const transcriptDisplay = document.getElementById("transcript-display");
+const voiceError = document.getElementById("voice-error");
