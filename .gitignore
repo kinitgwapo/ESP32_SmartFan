@@ -1,2 +1,5 @@
 WebPage/script.js
+
+# Ignore loginLogic.js to avoid publicizing cloud database credentials
 WebPage/loginFiles/loginLogic.js
+WebPage/controlFiles/controlLogic.js
