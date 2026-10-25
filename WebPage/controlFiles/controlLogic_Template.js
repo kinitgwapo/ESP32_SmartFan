@@ -47,3 +47,14 @@ logoutButton.addEventListener("click", async () => {
     }
 });
 
+// Real-time Firebase Fan Status Listener (Reading from state/speed)
+const fanStateRef = ref(db, "state/speed");
+
+onValue(fanSateRef, (snapshot) => {
+    const currentSpeed = snapshot.val();
+    if (currentSpeed) {
+        fanStatusSpan.textContent = currentSpeed.toUpperCase();
+    } else {
+        fanStatusSpan.textContent = "OFF";
+    }
+});
