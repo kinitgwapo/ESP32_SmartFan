@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
     <head>
-
+        <title>Login Page</title>
     </head>
 
 
@@ -14,6 +14,39 @@
 
 
     <body>
+
+        <!-- Firebase Connection Status-->
+        <div> 
+            <span id="firebase-connection-status">Connecting to Firebase...</span>
+        </div>
+
+        <hr>
+
+        <!-- Display Error Message -->
+        <div id="error-message" style="color: red;">
+            ERROR CODE
+        </div>
+
+        <!-- Login Form -->
+        <form id="login-form">
+            <!-- Email Input -->
+            <div>
+                <label for="email">Email:</label>
+                <input type="email" id="email-input" required>
+            </div>
+
+            <!-- Password Input -->
+            <div>
+                <label for="password">Password:</label>
+                <input type="password" id="password-input" required>
+            </div>
+
+            <!-- Login Button -->
+            <button type="submit" id="submit-button">Login</button>
+        </form>
+
+        <!-- Connect External Module script -->
+        <script type="module" src="loginFiles/loginLogic.js"></script>
 
     </body>
 </html>
