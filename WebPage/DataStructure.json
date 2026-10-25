@@ -1,11 +1,11 @@
 {
   "fan": {
-   "command": {
-    "speed": "off",
-    "commandId": 0
-  },
-  "state": {
-   "speed": "off"
-  } 
- }
+    "command": {
+      "speed": "off",
+      "commandId": 0
+    },
+    "state": {
+      "speed": "off"
+    }
+  }
 }
