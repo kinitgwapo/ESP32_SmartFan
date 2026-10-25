@@ -41,7 +41,7 @@ loginForm.addEventListener("submit", async (e) => {
     try {
         // If credentials correct, onAuthStateChanged redirects logged in user to control page
         await signInWithEmailAndPassword(auth, email, password);
-    } catch(error) {
+    } catch(error) { // Else check error code
         switch(error.code) {
             case "auth/invalid-email":
                 errorMessage.textContent = "Invalid email format!";
