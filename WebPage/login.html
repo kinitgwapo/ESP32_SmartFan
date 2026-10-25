@@ -5,6 +5,9 @@
 
         <!-- Connect External Module script -->
         <script type="module" src="loginFiles/loginLogic.js"></script>
+
+        <!-- Connect Stylesheet design -->
+        <link rel="stylesheet" href="loginFiles/loginStyle.css">
     </head>
 
 
@@ -16,30 +19,32 @@
 
 
 
-    <body>
+    <body id="page">
+        <main id="login-card">
+            <h1 id="login-title">Login</h1>
 
-        <!-- Display Error Message -->
-        <div id="error-message" style="color: red;">
-            TEMPORARY (Can tell status if submitted)
-        </div>
-
-        <!-- Login Form -->
-        <form id="login-form">
-            <!-- Email Input -->
-            <div>
-                <label for="email">Email:</label>
-                <input type="email" id="email-input" required>
+            <!-- Display Error Message -->
+            <div id="error-message" style="color: red;">
+                TEMPORARY (Can tell status if submitted)
             </div>
 
-            <!-- Password Input -->
-            <div>
-                <label for="password">Password:</label>
-                <input type="password" id="password-input" required>
-            </div>
+            <!-- Login Form -->
+            <form id="login-form">
+                <!-- Email Input -->
+                <div id="email-group">
+                    <label for="email" id="email-label">Email:</label>
+                    <input type="email" id="email-input" required>
+                </div>
 
-            <!-- Login Button -->
-            <button type="submit" id="submit-button">Login</button>
-        </form>
+                <!-- Password Input -->
+                <div id="password-group">
+                    <label for="password" id="password-label">Password:</label>
+                    <input type="password" id="password-input" required>
+                </div>
 
+                <!-- Login Button -->
+                <button type="submit" id="submit-button">Login</button>
+            </form>
+        </main>
     </body>
 </html>

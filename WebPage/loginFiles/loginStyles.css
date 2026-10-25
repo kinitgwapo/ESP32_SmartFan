@@ -1,0 +1,156 @@
+/* =========================================================
+   Login page – minimal dark theme (styled by id)
+   Edit the colors here once and the whole page updates.
+   ========================================================= */
+
+:root {
+    --bg:           #15171c;   /* page background */
+    --surface:      #1d2027;   /* card background */
+    --border:       #2e333d;   /* outlines */
+    --text:         #e8eaee;   /* main text */
+    --text-muted:   #9ba2af;   /* labels */
+    --accent:       #7ea6ff;   /* button and focus color */
+    --accent-hover: #9bb9ff;
+    --error:        #ff7b7b;   /* error message */
+    --radius:       10px;
+
+    color-scheme: dark;        /* dark scrollbars and autofill */
+}
+
+
+/* ---------- Page (body) ---------- */
+#page {
+    margin: 0;
+    min-height: 100vh;
+    min-height: 100dvh;        /* correct height on mobile browsers */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    box-sizing: border-box;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.5;
+}
+
+#page *,
+#page *::before,
+#page *::after {
+    box-sizing: border-box;
+}
+
+
+/* ---------- Card that holds everything ---------- */
+#login-card {
+    width: 100%;
+    max-width: 380px;
+    padding: 32px 28px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+#login-title {
+    margin: 0 0 20px;
+    font-size: 1.5rem;
+    font-weight: 600;
+}
+
+
+/* ---------- Error / status message ---------- */
+#error-message {
+    margin-bottom: 20px;
+    font-size: 0.9rem;
+    color: var(--error);
+}
+
+
+/* ---------- Form layout ---------- */
+#login-form {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+}
+
+#email-group,
+#password-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+
+/* ---------- Labels ---------- */
+#email-label,
+#password-label {
+    font-size: 0.9rem;
+    color: var(--text-muted);
+}
+
+
+/* ---------- Inputs ---------- */
+#email-input,
+#password-input {
+    width: 100%;
+    min-height: 44px;          /* easy to tap on phones */
+    padding: 10px 12px;
+    font-size: 16px;           /* stops iPhone from zooming in */
+    font-family: inherit;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+#email-input:hover,
+#password-input:hover {
+    border-color: #444b58;
+}
+
+#email-input:focus,
+#password-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(126, 166, 255, 0.25);
+}
+
+
+/* ---------- Login button ---------- */
+#submit-button {
+    min-height: 46px;
+    margin-top: 6px;
+    padding: 10px 16px;
+    font-size: 1rem;
+    font-weight: 600;
+    font-family: inherit;
+    color: #10131a;
+    background: var(--accent);
+    border: none;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+#submit-button:hover {
+    background: var(--accent-hover);
+}
+
+#submit-button:focus-visible {
+    outline: 2px solid var(--text);
+    outline-offset: 2px;
+}
+
+#submit-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+
+/* ---------- Small phones ---------- */
+@media (max-width: 480px) {
+    #login-card {
+        padding: 24px 20px;
+    }
+}
