@@ -4,34 +4,36 @@
         <title>Control Page</title>
 
         <!-- Connect External Module script -->
-        <script type="module" src="controlFiles/controlLogic.js""></script>
+        <script type="module" src="controlFiles/controlLogic.js"></script>
+         <!-- DisplayStylesheet -->
+        <link rel="stylesheet" href="controlFiles/controlStyles.css">
     </head>
 
-    <body>
-
+<body id="page">
+ 
         <!-- User Info & Logout -->
-        <div>
-            <h2>User Information</h2>
+        <div id="user-section">
+            <h2 id="user-title">User Information</h2>
             Logged in as: <span id="user-email">Loading...</span>
             <button id="logout-button">Logout</button>
         </div>
-
-        <hr> <!-- Horizontal Line Break -->
-
+ 
+        <hr id="divider-user"> <!-- Horizontal Line Break -->
+ 
         <!-- Fan Status Display -->
-        <div>
-            <h2>Fan Status</h2>
-            <p> Current State: <span id="fan-status">Loading...</span></p>
+        <div id="fan-section">
+            <h2 id="fan-title">Fan Status</h2>
+            <p id="fan-line"> Current State: <span id="fan-status">Loading...</span></p>
         </div>
-
-        <hr> <!-- Horizontal Line Break -->
-
+ 
+        <hr id="divider-fan"> <!-- Horizontal Line Break -->
+ 
         <!-- Speech-to-Text Voice Control -->
-        <div>
-            <h2>Voice Control</h2>
+        <div id="voice-section">
+            <h2 id="voice-title">Voice Control</h2>
             <button id="mic-button">Start voice Command</button>
-            <p>Transcript: <span id="transcript-display">Say something...</span></p>
-            <p id="voice-error" style="color: red;">TEMPORARY (Can tell voice status)</p>
+            <p id="transcript-line">Transcript: <span id="transcript-display">Say something...</span></p>
+            <p id="voice-error" style="color: red;"></p>
         </div>
     
     </body>
