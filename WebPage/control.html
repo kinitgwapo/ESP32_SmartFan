@@ -9,5 +9,29 @@
 
     <body>
 
+        <!-- User Info & Logout -->
+        <div>
+            <h2>User Information</h2>
+            Logged in as: <span id="user-email">Loading...</span>
+            <button id="logout-button">Logout</button>
+        </div>
+
+        <hr> <!-- Horizontal Line Break -->
+
+        <!-- Fan Status Display -->
+        <div>
+            <h2>Fan Status</h2>
+            <p> Current State: <span id="fan-status">Loading...</span></p>
+        </div>
+
+        <hr> <!-- Horizontal Line Break -->
+
+        <div>
+            <h2>Voice Control</h2>
+            <button id="mic-button">Start voice Command</button>
+            <p>Transcript: <span id="transcript-display">Say something...</span></p>
+            <p id="voice-error" style="color: red;">TEMPORARY (Can tell voice status)</p>
+        </div>
+    
     </body>
 </html>
