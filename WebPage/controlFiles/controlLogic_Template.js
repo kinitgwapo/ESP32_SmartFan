@@ -47,8 +47,8 @@ logoutButton.addEventListener("click", async () => {
     }
 });
 
-// Real-time Firebase Fan Status Listener (Reading from state/speed)
-const fanStateRef = ref(db, "state/speed");
+// Real-time Firebase Fan Status Listener (Reading from fan/state/speed)
+const fanStateRef = ref(db, "fan/state/speed");
 
 onValue(fanStateRef, (snapshot) => {
     const currentSpeed = snapshot.val();
