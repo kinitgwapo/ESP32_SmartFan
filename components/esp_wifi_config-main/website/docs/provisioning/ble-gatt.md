@@ -1,0 +1,318 @@
+---
+sidebar_position: 2
+title: BLE Provisioning
+description: Provision Wi-Fi over BLE using ESP-IDF's official Wi-Fi Provisioning manager
+---
+
+# BLE Provisioning
+
+ESP WiFi Config integrates with ESP-IDF's official **Wi-Fi Provisioning**
+manager (`wifi_prov_mgr` on IDF 5.4, `network_prov_mgr` on IDF 6.x) over
+the BLE scheme. This replaces the previous custom JSON-over-GATT service
+(UUID `0xFFE0`) which has been removed — see [MIGRATION.md][migrate] for
+how to update existing client tools.
+
+[migrate]: https://github.com/WiFiConfig/esp_wifi_config/blob/main/MIGRATION.md
+
+## Why Network Provisioning
+
+- Standard, audited protocol — works with **Espressif's official mobile
+  apps** out of the box ("ESP BLE Provisioning" on iOS / Android).
+- Encrypted handshake (Security 1 / 2) instead of plaintext JSON.
+- Bluedroid and NimBLE supported via the same code path.
+- Library still owns the higher-level lifecycle: provisioning mode,
+  retry/backoff, multi-network store, custom variables, post-prov HTTP.
+
+## Enabling in Arduino
+
+Native Arduino uses the same provisioning protocol and custom endpoints. Put
+these flags in the sketch's `build_opt.h`, or in PlatformIO's `build_flags`:
+
+```text
+-DWIFI_CFG_ARDUINO_PROV_BLE=1
+```
+
+This selects the board package's stock BLE host. To use **NimBLE-Arduino 2.5.1**,
+install that optional library and also set `-DWIFI_CFG_ARDUINO_NIMBLE=1`.
+See the [Arduino guide](../arduino.md#nimble-arduino) for setup, measured RAM
+savings and runtime compatibility limits. The `NimBLEProvisioning` sketch
+provides a complete native example. Arduino builds do not use the Kconfig
+settings below; use the Arduino guide's C++ configuration example instead.
+
+## Enabling in ESP-IDF
+
+### 1. Kconfig
+
+```kconfig
+CONFIG_WIFI_CFG_ENABLE_NETWORK_PROVISIONING=y
+CONFIG_WIFI_CFG_NETWORK_PROVISIONING_BLE=y
+```
+
+That's the whole Kconfig surface. Security version, PoP, device-name
+template, and the rest of the runtime parameters are set on
+`wifi_cfg_prov_config_t` in step 3 below.
+
+Mutually exclusive with `CONFIG_WIFI_CFG_ENABLE_IMPROV_BLE` — both want
+to own the BLE GAP advertising and the host stack.
+
+### 2. Bluetooth Stack
+
+```kconfig
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y          # recommended
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=6144
+# Or:
+# CONFIG_BT_BLUEDROID_ENABLED=y
+```
+
+### 3. Runtime Config
+
+```c
+wifi_cfg_init(&(wifi_cfg_config_t){
+    WIFI_CFG_DEFAULTS,
+    // provisioning_mode is already WIFI_PROV_ON_FAILURE from the macro.
+    .stop_provisioning_on_connect = true,
+    .provisioning_teardown_delay_ms = 5000,
+
+    // Left at their defaults here: device_name ("PROV_{id}", supports {id}),
+    // security (Security 1), memory_policy (FREE_BTDM, see c-api.md),
+    // max_failed_attempts (3), cleanup_delay_ms (1000),
+    // reboot_max_wait_ms (15000).
+    .prov_ble = {
+        .pop                 = "1234abcd",  // Security 1 PoP (NULL/"" → no PoP)
+        .wifi_conn_attempts  = 5,           // 0 = infinite
+        .reset_on_failure    = true,        // accept retries without reboot
+        .firmware_version    = "1.0.0",
+    },
+});
+```
+
+`provisioning_mode` controls **when** wifi_prov_mgr is started:
+
+| Mode | Behaviour |
+|------|-----------|
+| `WIFI_PROV_ON_FAILURE` | start when no networks saved or all failed (**the default**) |
+| `WIFI_PROV_WHEN_UNPROVISIONED` | start only if no networks saved |
+| `WIFI_PROV_MANUAL` | only via explicit API call |
+| `WIFI_PROV_ALWAYS` | **Disabled** — treated as `WIFI_PROV_MANUAL`. See [Provisioning Modes](./modes.md#modes). |
+
+`stop_provisioning_on_connect` and `provisioning_teardown_delay_ms`
+schedule shutdown of the active provisioning interfaces after the station gets
+an IP, including BLE. The provisioning manager applies its `cleanup_delay_ms`
+grace when stopping. Automatic reboot is a separate path, described below;
+clients must finish endpoint reads before either path closes the connection.
+See the [BLE Protocol Reference](../api/ble-protocol.md) for all five library
+JSON endpoints and [BLE Wire Protocol](../api/ble-wire-protocol.md) for client
+implementation details.
+
+## Reboot on successful provisioning
+
+When the BLE channel is enabled, the device reboots automatically
+after the credential handoff or the success backstop described below. The
+reboot is **on by default** and can be disabled when the application manages
+the BLE/Wi-Fi handoff itself.
+
+### Why
+
+The default reboot was introduced to avoid BLE/Wi-Fi handoff failures seen
+with Espressif's SDK provisioning stack. It remains enabled for both stock and
+NimBLE-Arduino builds unless the application disables it.
+
+Native Arduino tests now cover provisioning and repeated `begin()` / `end()`
+without rebooting, including NimBLE-Arduino. To use that lifecycle, set
+`prov_ble.disable_reboot_on_provisioning_success=true`. This does not enable
+sharing the NimBLE-Arduino server with application BLE code; its
+[ownership and cleanup limits](../arduino.md#nimble-arduino) still apply.
+
+### Trigger ordering
+
+The reboot fires on whichever happens first:
+
+1. While the provisioning manager is active, the BLE client disconnecting
+   after `WIFI_PROV_EVT_CRED_RECV`. This means credentials were received,
+   **not necessarily that Wi-Fi connected**. The library logs `Provisioning complete;
+   client disconnected, rebooting`, waits ~50 ms for the final
+   protocomm response to drain, and calls `esp_restart()`.
+2. A backstop timer started on `WIFI_PROV_EVT_CRED_SUCCESS`. Default
+   15000 ms; tunable via `prov_ble.reboot_max_wait_ms`. Catches clients
+   that simply disappear (force-quit, lost link) and never deliver a
+   clean disconnect. It must comfortably exceed the client's status-poll
+   interval (~5 s for Espressif's ESPProvision SDK) plus associate and
+   DHCP, or the device can reboot between two polls and the client
+   reports a false failure.
+
+Both paths call `esp_restart()`. The first to fire wins. The separate
+teardown-on-connect policy may close BLE sooner than the backstop; 15 seconds
+is not a guaranteed window for endpoint reads. If the link drops before the
+client confirms Connected, report an unconfirmed outcome and verify through
+an application-specific LAN/status check. Do not report success based only
+on a disconnect or disappearance from advertising.
+
+### Configuration
+
+```c
+.prov_ble = {
+    // Default: reboot enabled (false → reboot on).
+    // Set true ONLY if the application owns the BLE/Wi-Fi handoff itself.
+    .disable_reboot_on_provisioning_success = false,
+
+    // Backstop wait between CRED_SUCCESS and the forced reboot, in ms.
+    // 0 → 15000 ms. Ignored when disable_reboot_on_provisioning_success is true.
+    .reboot_max_wait_ms = 15000,
+}
+```
+
+The field uses negative polarity (`disable_reboot_...`) to match the
+existing `disable_disconnect_restart` knob — both are default-on
+`wifi_prov_mgr`/NimBLE workarounds, so a `false` value gives the safer
+behaviour.
+
+### Implications for application code
+
+- **`prov_ble.on_credentials_success` and the `WIFI_CFG_EVENT_PROV_CRED_SUCCESS`
+  event still fire** — the callback runs before the reboot is
+  scheduled. Anything that must persist needs to land in NVS inside
+  that callback. If you need a wider window for the work to complete,
+  extend `prov_ble.reboot_max_wait_ms`.
+- **`prov_ble.stop_after_success` is bypassed** while reboot-on-success
+  is active. This does not bypass the separate teardown-on-connect policy.
+- **`stop_provisioning_on_connect` / `provisioning_teardown_delay_ms`**
+  still drive shutdown of active provisioning interfaces, including BLE.
+- **`disable_reboot_on_provisioning_success = true`** is intended for
+  apps that consciously own the BLE/Wi-Fi handoff — e.g., a flow that
+  morphs from BLE provisioning into a BLE companion link, or an app
+  that takes over the BLE stack via `disable_disconnect_restart` and
+  `keep_ble_on_after_stop`. Opting out accepts the `wifi_prov_mgr`
+  in-place teardown sharp edges as a trade-off.
+
+## Security versions
+
+| Version | Handshake | Setup cost |
+|---------|-----------|-----------|
+| Security 0 | one-round session handshake, plaintext | no credentials — testing only |
+| Security 1 | Curve25519 + AES-CTR with PoP | set `prov_ble.pop` (or leave NULL for no-PoP mode) |
+| Security 2 | SRP6a (salted authenticated key exchange) | requires pre-computed `salt` + `verifier` |
+
+For Security 2, derive the `salt` / `verifier` offline using
+`esp-idf-provisioning`'s helper or the `esp_prov` Python tool, embed the
+bytes in firmware, and pass them via `wifi_cfg_prov_config_t`:
+
+```c
+extern const uint8_t my_salt[];
+extern const size_t  my_salt_len;
+extern const uint8_t my_verifier[];
+extern const size_t  my_verifier_len;
+
+wifi_cfg_init(&(wifi_cfg_config_t){
+    WIFI_CFG_DEFAULTS,
+    .prov_ble = {
+        .security                 = WIFI_CFG_PROV_SECURITY_2,
+        .security2_username       = "device-fleet-2",
+        .security2_salt           = my_salt,
+        .security2_salt_len       = my_salt_len,
+        .security2_verifier       = my_verifier,
+        .security2_verifier_len   = my_verifier_len,
+    },
+});
+```
+
+If `prov_ble.security` is set to `WIFI_CFG_PROV_SECURITY_2` but no
+salt/verifier is provided, `wifi_cfg_init()` returns
+`ESP_ERR_INVALID_ARG` — the library does not silently fall back.
+
+## Custom protocomm endpoints
+
+Alongside the standard `prov-config` / `prov-scan` endpoints, the library
+registers four custom protocomm endpoints. They are minimal by design —
+the goal is to expose the library's higher-level state, not to recreate
+the broad pre-Wi-Fi management surface that previously lived in the
+0xFFE0 service.
+
+| Endpoint | Direction | Purpose |
+|----------|-----------|---------|
+| `esp-wifi-config-version` | read | library/IDF/firmware versions |
+| `esp-wifi-config-capabilities` | read | feature flags + limits |
+| `esp-wifi-config-vars` | read/write | the custom variable store |
+| `esp-wifi-config-network-policy` | read | `provisioning_mode`, retries |
+
+The `vars` endpoint accepts a small JSON request:
+
+```json
+{"op": "list"}
+{"op": "get", "key": "server_url"}
+{"op": "set", "key": "server_url", "value": "https://api.example.com"}
+{"op": "del", "key": "server_url"}
+```
+
+## Recommended clients
+
+- **iOS / Android — "ESP BLE Provisioning"** (Espressif official app)
+- **`esp-prov` Python tool** (in any ESP-IDF checkout under
+  `tools/esp_prov/`) — useful for CI and headless setup
+- **`esp-idf-provisioning-android` / `-ios`** SDKs if you ship a
+  custom mobile app
+
+## iOS "ESP BLE Provisioning" app — "Encrypted Communication" toggle
+
+Espressif's iOS "ESP BLE Provisioning" app exposes a setting that the
+app does **not** auto-negotiate with the device. It is on the Settings
+screen reached via the gear icon in the upper-left of the device-list
+screen, and is labelled **"Encrypted Communication"**:
+
+| Toggle state | Wire protocol used by the app | Required device build |
+|--------------|--------------------------------|------------------------|
+| Off ("Unsecured") | plaintext protocomm — no handshake | `.prov_ble.security = WIFI_CFG_PROV_SECURITY_0` |
+| On ("Secured")    | Security 2 (SRP6a) — app prompts for a username at connect time | `.prov_ble.security = WIFI_CFG_PROV_SECURITY_2` with a valid salt/verifier |
+
+The toggle is sticky across sessions and is not adjusted based on what
+the device advertises in its BLE service data. The app gives no in-app
+indication that it exists or that it has to match the firmware.
+
+### Confirmed behaviour
+
+- **Security 0 device, app in "Unsecured" mode** — works. Credentials
+  transfer in plaintext as expected.
+- **Security 0 device, app in "Secured" mode** — the app hangs after
+  the device is tapped. No PoP prompt appears, no Wi-Fi scan list is
+  rendered, and there is no error toast or log entry that surfaces the
+  mismatch. The fix is to flip the toggle to "Unsecured" and reopen the
+  device.
+
+### Not yet confirmed
+
+The interaction between this toggle and **Security 1 (PoP)** has not
+yet been validated against this app. Neither toggle position obviously
+corresponds to Security 1 on the wire — "Unsecured" is plaintext and
+"Secured" is SRP6a — so a Security 1 device may not be reachable from
+this app at all. If you require Security 1 specifically, use the
+Android app, `esp_prov`, or your own client built on the
+`esp-idf-provisioning-*` SDKs until this is confirmed.
+
+### Practical guidance
+
+- Pick the security version at build time and document the matching
+  toggle position in any user-facing setup instructions you ship.
+- If you support a mixed fleet that uses different security versions,
+  prefer the Android app or `esp_prov` for QA — the iOS toggle becomes
+  a per-device manual step.
+- The same caveat does not appear in Espressif's `esp_prov` Python
+  tool: that one is told the security version via a CLI flag
+  (`--sec_ver`) and will not silently hang on mismatch.
+
+## Coexistence with Improv
+
+`CONFIG_WIFI_CFG_ENABLE_IMPROV_BLE` is mutually exclusive with
+`CONFIG_WIFI_CFG_ENABLE_NETWORK_PROVISIONING` — they cannot both be
+enabled in a single firmware build. If you need to support both
+ecosystems, ship two firmware variants. Improv Serial
+(`CONFIG_WIFI_CFG_ENABLE_IMPROV_SERIAL`) is independent of BLE and
+remains safe to enable alongside Network Provisioning.
+
+## ESP-IDF version requirements
+
+- **Minimum**: ESP-IDF 5.4 (uses the in-tree `wifi_provisioning`
+  component).
+- **6.x**: works via the external `espressif/network_provisioning`
+  managed component, declared in this library's `idf_component.yml`
+  with an `idf_version >=6.0` rule. The implementation switches between
+  the two via a thin compatibility shim in `esp_wifi_config_prov_ble.c`.
