@@ -1,0 +1,2 @@
+source D:/BCA152/ESP32_SmartFan/.pio/build/esp32dev/gdbinit/symbols
+source D:/BCA152/ESP32_SmartFan/.pio/build/esp32dev/gdbinit/connect

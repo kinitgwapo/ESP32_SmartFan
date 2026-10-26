@@ -1,0 +1,13 @@
+# Target labels
+ bootloader
+# Source files and their labels
+D:/BCA152/ESP32_SmartFan/.pio/build/esp32dev/CMakeFiles/bootloader
+D:/BCA152/ESP32_SmartFan/.pio/build/esp32dev/CMakeFiles/bootloader.rule
+D:/BCA152/ESP32_SmartFan/.pio/build/esp32dev/CMakeFiles/bootloader-complete.rule
+D:/BCA152/ESP32_SmartFan/.pio/build/esp32dev/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule
+D:/BCA152/ESP32_SmartFan/.pio/build/esp32dev/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule
+D:/BCA152/ESP32_SmartFan/.pio/build/esp32dev/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule
+D:/BCA152/ESP32_SmartFan/.pio/build/esp32dev/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule
+D:/BCA152/ESP32_SmartFan/.pio/build/esp32dev/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule
+D:/BCA152/ESP32_SmartFan/.pio/build/esp32dev/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule
+D:/BCA152/ESP32_SmartFan/.pio/build/esp32dev/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule

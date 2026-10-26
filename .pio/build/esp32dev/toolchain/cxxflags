@@ -1,0 +1,7 @@
+-Wno-frame-address
+-mlongcalls
+-fno-builtin-memcpy
+-fno-builtin-memset
+-fno-builtin-bzero
+"-specs=D:/BCA152/ESP32_SmartFan/.pio/build/esp32dev/specs/picolibc.specs"
+-fno-rtti
