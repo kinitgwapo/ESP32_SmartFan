@@ -63,6 +63,13 @@ onValue(fanStateRef, (snapshot) => {
 const fanCommandRef = ref(db, "fan/command");
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
+const speedKeywords = {
+    high: ["high", "fast", "max", "maximum", "turbo"],
+    normal: ["normal", "medium", "med", "on", "start"],
+    low: ["low", "slow", "minimum", "min", "lowest"],
+    off: ["off", "stop", "halt", "end", "freeze"]
+}
+
 //Compatibility Guard & Engine Configuration
 if (!SpeechRecognition) {
     micButton.disabled = true;
@@ -93,17 +100,11 @@ if (!SpeechRecognition) {
         let targetSpeed = null;
 
         // Check speech keywords against the 4 speed settings
-        if (speechToText.includes("high") || speechToText.includes("fast") || speechToText.includes("max")) {
-            targetSpeed = "high";
-        } else if (speechToText.includes("normal") || speechToText.includes("medium")) {
-            targetSpeed = "normal";
-        } else if (speechToText.includes("low") || speechToText.includes("slow")) {
-            targetSpeed = "low";
-        } else if (speechToText.includes("off") || speechToText.includes("stop")) {
-            targetSpeed = "off";
-        } else if (speechToText.includes("on") || speechToText.includes("start")) {
-            // Default generic "turn on" command to normal speed
-            targetSpeed = "normal";
+        for(const [speed, keywords] of Object.entries(speedKeywords)) {
+            if(keywords.some(keyword => speechToText.includes(keyword))) {
+                targetSpeed = speed;
+                break;
+            }
         }
 
         // If a valid command was recognized, write to Firebase
