@@ -1,6 +1,0 @@
-dependencies:
-  idf:
-    version: ">=5.0.0"
-  esp_wifi_config:
-    version: "*"
-    path: "../../.."
