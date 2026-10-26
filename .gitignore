@@ -73,3 +73,6 @@ node_modules/
 # dataconnect generated files
 .dataconnect
 ##########################################################################################
+
+# Ignore PIO folder to avoid publicizing cloud database credentials
+.pio
