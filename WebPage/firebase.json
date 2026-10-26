@@ -5,9 +5,15 @@
       "firebase.json",
       "**/.*",
       "**/node_modules/**",
-      
+
       "**/*_Template.json",
       "DataStructure.json"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/login.html"
+      }
     ]
   }
 }
