@@ -74,5 +74,8 @@ node_modules/
 .dataconnect
 ##########################################################################################
 
-# Ignore PIO folder to avoid publicizing cloud database credentials
+# Ignore PlatformIO Files
 .pio
+
+.vscode/launch.json
+c_cpp_properties.json
