@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Custom Web UI Placeholder</title>
+    <style>
+        body { font-family: system-ui; max-width: 600px; margin: 50px auto; padding: 20px; }
+        code { background: #f0f0f0; padding: 2px 6px; border-radius: 4px; }
+        pre { background: #f0f0f0; padding: 15px; border-radius: 8px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <h1>Custom Web UI</h1>
+    <p>This is a placeholder. To use the full Web UI:</p>
+    <pre>
+# Copy and build frontend
+cp -r ../../../frontend ./frontend
+cd frontend && npm install && npm run build && cd ..
+
+# Copy built files
+cp frontend/dist/index.html www/
+mkdir -p www/assets
+cp frontend/dist/assets/*.gz www/assets/
+
+# Rebuild and flash
+idf.py build flash
+    </pre>
+    <p>Or create your own frontend using the <a href="/api/wifi/status">REST API</a>.</p>
+</body>
+</html>

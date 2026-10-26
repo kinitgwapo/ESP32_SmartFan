@@ -1,0 +1,15 @@
+CONFIG_IDF_TARGET="esp32s3"
+
+# Use larger partition table for BLE (requires 4MB+ flash)
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# BLE Configuration — NimBLE (lighter than Bluedroid)
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=6144
+
+# Use Improv BLE so the host-stack handoff pattern that this example
+# demonstrates (deinit library, keep NimBLE alive, register app GATT
+# service) is exercised end-to-end. Network Provisioning manages its own
+# BLE lifecycle and is a poor fit for this particular example.
+CONFIG_WIFI_CFG_ENABLE_IMPROV_BLE=y

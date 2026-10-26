@@ -1,0 +1,49 @@
+name: Build Examples
+
+on:
+  push:
+    branches: [main, feat/gh_actions, feature/arduino-support]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every directory under examples/. This list is enumerated rather
+        # than globbed, so a new example is invisible to CI until it is added
+        # here -- which is how with_improv went unbuilt from the day it was
+        # written.
+        example:
+          - basic
+          - with_ble
+          - with_ble_deinit
+          - with_cli
+          - with_improv
+          - with_shared_httpd
+          - with_webui
+          - with_webui_customize
+          - with_webui_app_assets
+        idf_target:
+          - esp32
+          - esp32s3
+        idf_version:
+          - "v5.4"
+          - "v5.5"
+
+    container:
+      image: espressif/idf:${{ matrix.idf_version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build ${{ matrix.example }} for ${{ matrix.idf_target }}
+        working-directory: examples/${{ matrix.example }}
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py set-target ${{ matrix.idf_target }}
+          idf.py build

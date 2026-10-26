@@ -1,0 +1,38 @@
+version: "0.4.1"
+description: WiFi Config component with multi-network support, auto-reconnect, SoftAP captive portal, REST API, and ESP-IDF Network Provisioning over BLE
+url: https://github.com/WiFiConfig/esp_wifi_config
+repository: https://github.com/WiFiConfig/esp_wifi_config.git
+documentation: https://wificonfig.com
+issues: https://github.com/WiFiConfig/esp_wifi_config/issues
+license: MIT
+
+# The registry excludes dist directories by default, including these checked-in
+# assets required by CMake when the embedded web UI is enabled.
+files:
+  include:
+    - "frontend/dist/index.html"
+    - "frontend/dist/assets/app.js.gz"
+    - "frontend/dist/assets/index.css.gz"
+
+maintainers:
+  - thorrak
+
+targets:
+  - esp32
+  - esp32s2
+  - esp32s3
+  - esp32c3
+  - esp32c6
+
+dependencies:
+  idf:
+    version: ">=5.4"
+
+  # IDF 6.x retires the in-tree wifi_provisioning component in favour of
+  # this managed component. The rule below pulls it in only on IDF 6+; on
+  # IDF 5.4 the in-tree wifi_provisioning is used (no managed dep needed).
+  # See MIGRATION.md for the migration plan.
+  espressif/network_provisioning:
+    version: "^1.0.0"
+    rules:
+      - if: "idf_version >=6.0"

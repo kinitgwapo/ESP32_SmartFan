@@ -1,0 +1,373 @@
+/**
+ * @file esp_wifi_config_ap.c
+ * @brief SoftAP and variable management
+ */
+
+#include "esp_wifi_config_priv.h"
+#include "esp_log.h"
+#include "esp_mac.h"
+#include "lwip/sockets.h"
+#include <string.h>
+
+#if WIFI_CFG_SOFTAP
+/* Only the access-point half logs; the variable API below and
+ * wifi_cfg_expand_template() do not, so with the portal compiled out this
+ * would be an unused-variable warning. */
+static const char *TAG = "wifi_cfg_ap";
+#endif
+
+/**
+ * @brief Expand {id} placeholder with MAC address suffix
+ * @param tmpl Template string (e.g., "ESP32-{id}")
+ * @param output Output buffer
+ * @param max_len Output buffer size
+ */
+void wifi_cfg_expand_template(const char *tmpl, char *output, size_t max_len)
+{
+    const char *placeholder = strstr(tmpl, "{id}");
+    if (!placeholder) {
+        strncpy(output, tmpl, max_len - 1);
+        output[max_len - 1] = '\0';
+        return;
+    }
+
+    // Get MAC address (use STA MAC for consistency)
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+
+    // Build output: prefix + MAC suffix (last 3 bytes = 6 hex chars)
+    size_t prefix_len = placeholder - tmpl;
+    if (prefix_len >= max_len) prefix_len = max_len - 1;
+
+    strncpy(output, tmpl, prefix_len);
+    snprintf(output + prefix_len, max_len - prefix_len, "%02X%02X%02X%s",
+             mac[3], mac[4], mac[5], placeholder + 4);
+}
+
+// =============================================================================
+// SoftAP Management
+// =============================================================================
+//
+// Everything from here to the Variable Management section is the access point
+// itself. wifi_cfg_expand_template() above and the variable API below are not:
+// the BLE device name uses the first, and the CLI and prov-BLE backend use the
+// second, so this file stays in SRCS either way and only this half is cut.
+
+#if WIFI_CFG_SOFTAP
+
+esp_err_t wifi_cfg_start_ap(const wifi_cfg_ap_config_t *config)
+{
+    if (!g_wifi_cfg) return ESP_ERR_INVALID_STATE;
+    
+    const wifi_cfg_ap_config_t *ap_cfg = config ? config : &g_wifi_cfg->ap_config;
+    
+    // Mark as active immediately to prevent reconnect races
+    g_wifi_cfg->ap_active = true;
+    
+    // Expand SSID template (replace {id} with MAC suffix)
+    char ssid_expanded[32];
+    wifi_cfg_expand_template(ap_cfg->ssid, ssid_expanded, sizeof(ssid_expanded));
+    
+    ESP_LOGI(TAG, "Starting AP: %s", ssid_expanded);
+
+    // Only change mode if not already in APSTA
+    wifi_mode_t current_mode;
+    esp_wifi_get_mode(&current_mode);
+    if (current_mode != WIFI_MODE_APSTA) {
+        wifi_cfg_platform_set_mode(WIFI_MODE_APSTA);
+    }
+    
+    wifi_config_t wifi_cfg = {
+        .ap = {
+            .max_connection = ap_cfg->max_connections ? ap_cfg->max_connections : 4,
+            .authmode = ap_cfg->password[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN,
+            .channel = ap_cfg->channel,
+            .ssid_hidden = ap_cfg->hidden,
+        },
+    };
+    strncpy((char *)wifi_cfg.ap.ssid, ssid_expanded, sizeof(wifi_cfg.ap.ssid) - 1);
+    wifi_cfg.ap.ssid_len = strlen(ssid_expanded);
+    if (ap_cfg->password[0]) {
+        strncpy((char *)wifi_cfg.ap.password, ap_cfg->password, sizeof(wifi_cfg.ap.password) - 1);
+    }
+    
+    esp_wifi_set_config(WIFI_IF_AP, &wifi_cfg);
+
+    // Start DNS server for captive portal
+    wifi_cfg_dns_start();
+
+    // Configure static IP
+    if (ap_cfg->ip[0]) {
+        esp_netif_dhcps_stop(g_wifi_cfg->ap_netif);
+        
+        esp_netif_ip_info_t ip_info = {0};
+        inet_pton(AF_INET, ap_cfg->ip, &ip_info.ip);
+        inet_pton(AF_INET, ap_cfg->netmask[0] ? ap_cfg->netmask : "255.255.255.0", &ip_info.netmask);
+        inet_pton(AF_INET, ap_cfg->gateway[0] ? ap_cfg->gateway : ap_cfg->ip, &ip_info.gw);
+        
+        esp_netif_set_ip_info(g_wifi_cfg->ap_netif, &ip_info);
+        esp_netif_dhcps_start(g_wifi_cfg->ap_netif);
+    }
+
+    // Emit AP start event after config is fully applied, so listeners
+    // see the correct SSID/IP. This avoids spurious events from
+    // intermediate driver restarts (set_mode then set_config).
+    wifi_cfg_event_post(WIFI_CFG_EVENT_AP_START, NULL, 0);
+
+    return ESP_OK;
+}
+
+esp_err_t wifi_cfg_stop_ap(void)
+{
+    if (!g_wifi_cfg) return ESP_ERR_INVALID_STATE;
+
+    ESP_LOGI(TAG, "Stopping AP");
+
+    // Stop DNS server
+    wifi_cfg_dns_stop();
+
+    g_wifi_cfg->ap_active = false;
+    wifi_cfg_platform_set_mode(WIFI_MODE_STA);
+
+    wifi_cfg_event_post(WIFI_CFG_EVENT_AP_STOP, NULL, 0);
+
+    return ESP_OK;
+}
+
+esp_err_t wifi_cfg_ap_reassert(const char *why)
+{
+    if (!g_wifi_cfg) return ESP_ERR_INVALID_STATE;
+
+    /* Nothing to reconcile unless the application asked for an AP and a
+     * provisioning session is the thing that would have taken it away. */
+    if (!g_wifi_cfg->config.enable_ap || !g_wifi_cfg->provisioning_active) {
+        return ESP_OK;
+    }
+
+    /* Ask the driver rather than trusting our own flag: this runs from the
+     * AP_STOP path, where an intermediate driver restart inside
+     * wifi_cfg_start_ap() can produce a stop event for an AP that is on its
+     * way up. If the interface is there, there is nothing to do. */
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    if (esp_wifi_get_mode(&mode) != ESP_OK) return ESP_OK;
+    if (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA) return ESP_OK;
+
+    if (g_wifi_cfg->ap_reassert_count >= WIFI_CFG_AP_REASSERT_MAX) {
+        ESP_LOGE(TAG, "SoftAP taken down by %s again and the ceiling of %d "
+                      "restarts is reached; leaving it down. The captive "
+                      "portal is not reachable for the rest of this session.",
+                 why, WIFI_CFG_AP_REASSERT_MAX);
+        return ESP_FAIL;
+    }
+
+    g_wifi_cfg->ap_reassert_count++;
+    ESP_LOGW(TAG, "SoftAP was taken down by %s; restarting it (%d/%d). "
+                  "enable_ap and BLE provisioning both being on is supported, "
+                  "but the provisioning manager forces station-only mode and "
+                  "does not know the AP was meant to stay.",
+             why, g_wifi_cfg->ap_reassert_count, WIFI_CFG_AP_REASSERT_MAX);
+
+    return wifi_cfg_start_ap(NULL);
+}
+
+esp_err_t wifi_cfg_get_ap_status(wifi_ap_status_t *status)
+{
+    if (!g_wifi_cfg || !status) return ESP_ERR_INVALID_ARG;
+    
+    memset(status, 0, sizeof(wifi_ap_status_t));
+    status->active = g_wifi_cfg->ap_active;
+    
+    if (g_wifi_cfg->ap_active) {
+        wifi_config_t cfg;
+        if (esp_wifi_get_config(WIFI_IF_AP, &cfg) == ESP_OK) {
+            strncpy(status->ssid, (char *)cfg.ap.ssid, sizeof(status->ssid) - 1);
+            status->channel = cfg.ap.channel;
+        }
+        
+        esp_netif_ip_info_t ip_info;
+        if (esp_netif_get_ip_info(g_wifi_cfg->ap_netif, &ip_info) == ESP_OK) {
+            snprintf(status->ip, sizeof(status->ip), IPSTR, IP2STR(&ip_info.ip));
+        }
+        
+        wifi_sta_list_t sta_list;
+        if (esp_wifi_ap_get_sta_list(&sta_list) == ESP_OK) {
+            status->sta_count = sta_list.num;
+            for (int i = 0; i < sta_list.num && i < 4; i++) {
+                snprintf(status->clients[i].mac, sizeof(status->clients[i].mac),
+                         MACSTR, MAC2STR(sta_list.sta[i].mac));
+            }
+        }
+    }
+    
+    return ESP_OK;
+}
+
+esp_err_t wifi_cfg_set_ap_config(const wifi_cfg_ap_config_t *config)
+{
+    if (!g_wifi_cfg || !config) return ESP_ERR_INVALID_ARG;
+    
+    memcpy(&g_wifi_cfg->ap_config, config, sizeof(wifi_cfg_ap_config_t));
+    wifi_cfg_nvs_save_ap_config(config);
+    
+    if (g_wifi_cfg->ap_active) {
+        wifi_cfg_start_ap(config);
+    }
+    
+    return ESP_OK;
+}
+
+esp_err_t wifi_cfg_get_ap_config(wifi_cfg_ap_config_t *config)
+{
+    if (!g_wifi_cfg || !config) return ESP_ERR_INVALID_ARG;
+    memcpy(config, &g_wifi_cfg->ap_config, sizeof(wifi_cfg_ap_config_t));
+    return ESP_OK;
+}
+
+#else  /* !WIFI_CFG_SOFTAP */
+
+// The public SoftAP surface keeps its declarations in esp_wifi_config.h and
+// keeps linking, so an application that calls it still builds when the portal
+// is compiled out -- it gets ESP_ERR_NOT_SUPPORTED at runtime instead of an
+// undefined reference at link time. --gc-sections drops whichever of these the
+// application does not actually call, so the compatibility costs nothing.
+//
+// wifi_cfg_stop_http() lives here rather than in esp_wifi_config_http.c for the
+// same reason the AP stubs do: that file is not compiled in this configuration.
+
+esp_err_t wifi_cfg_start_ap(const wifi_cfg_ap_config_t *config)
+{
+    (void)config;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t wifi_cfg_stop_ap(void)
+{
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t wifi_cfg_get_ap_status(wifi_ap_status_t *status)
+{
+    if (!status) return ESP_ERR_INVALID_ARG;
+    memset(status, 0, sizeof(*status));
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t wifi_cfg_set_ap_config(const wifi_cfg_ap_config_t *config)
+{
+    (void)config;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t wifi_cfg_get_ap_config(wifi_cfg_ap_config_t *config)
+{
+    if (!config) return ESP_ERR_INVALID_ARG;
+    memset(config, 0, sizeof(*config));
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t wifi_cfg_stop_http(void)
+{
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+#endif /* WIFI_CFG_SOFTAP */
+
+// =============================================================================
+// Variable Management
+// =============================================================================
+
+esp_err_t wifi_cfg_set_var(const char *key, const char *value)
+{
+    if (!g_wifi_cfg || !key || !value) return ESP_ERR_INVALID_ARG;
+
+    // Run variable validation callback if configured
+    if (g_wifi_cfg->config.on_before_var_set) {
+        esp_err_t vret = g_wifi_cfg->config.on_before_var_set(key, value, g_wifi_cfg->config.var_validator_ctx);
+        if (vret != ESP_OK) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+
+    wifi_cfg_lock();
+    
+    for (size_t i = 0; i < g_wifi_cfg->var_count; i++) {
+        if (strcmp(g_wifi_cfg->vars[i].key, key) == 0) {
+            strncpy(g_wifi_cfg->vars[i].value, value, sizeof(g_wifi_cfg->vars[i].value) - 1);
+            wifi_cfg_nvs_save_vars(g_wifi_cfg->vars, g_wifi_cfg->var_count);
+            wifi_cfg_unlock();
+            
+            wifi_var_t var;
+            strncpy(var.key, key, sizeof(var.key) - 1);
+            strncpy(var.value, value, sizeof(var.value) - 1);
+            wifi_cfg_event_post(WIFI_CFG_EVENT_VAR_CHANGED, &var, sizeof(var));
+            return ESP_OK;
+        }
+    }
+    
+    if (g_wifi_cfg->var_count >= WIFI_CFG_MAX_VARS) {
+        wifi_cfg_unlock();
+        return ESP_ERR_NO_MEM;
+    }
+    
+    strncpy(g_wifi_cfg->vars[g_wifi_cfg->var_count].key, key, 
+            sizeof(g_wifi_cfg->vars[0].key) - 1);
+    strncpy(g_wifi_cfg->vars[g_wifi_cfg->var_count].value, value, 
+            sizeof(g_wifi_cfg->vars[0].value) - 1);
+    g_wifi_cfg->var_count++;
+    
+    wifi_cfg_nvs_save_vars(g_wifi_cfg->vars, g_wifi_cfg->var_count);
+    wifi_cfg_unlock();
+    
+    wifi_var_t var = {0};
+    strncpy(var.key, key, sizeof(var.key) - 1);
+    strncpy(var.value, value, sizeof(var.value) - 1);
+    wifi_cfg_event_post(WIFI_CFG_EVENT_VAR_CHANGED, &var, sizeof(var));
+    
+    return ESP_OK;
+}
+
+esp_err_t wifi_cfg_get_var(const char *key, char *value, size_t max_len)
+{
+    if (!g_wifi_cfg || !key || !value) return ESP_ERR_INVALID_ARG;
+    
+    wifi_cfg_lock();
+    
+    for (size_t i = 0; i < g_wifi_cfg->var_count; i++) {
+        if (strcmp(g_wifi_cfg->vars[i].key, key) == 0) {
+            strncpy(value, g_wifi_cfg->vars[i].value, max_len - 1);
+            value[max_len - 1] = '\0';
+            wifi_cfg_unlock();
+            return ESP_OK;
+        }
+    }
+    
+    wifi_cfg_unlock();
+    return ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t wifi_cfg_del_var(const char *key)
+{
+    if (!g_wifi_cfg || !key) return ESP_ERR_INVALID_ARG;
+    
+    wifi_cfg_lock();
+    
+    for (size_t i = 0; i < g_wifi_cfg->var_count; i++) {
+        if (strcmp(g_wifi_cfg->vars[i].key, key) == 0) {
+            wifi_var_t var = {0};
+            strncpy(var.key, key, sizeof(var.key) - 1);
+            
+            for (size_t j = i; j < g_wifi_cfg->var_count - 1; j++) {
+                g_wifi_cfg->vars[j] = g_wifi_cfg->vars[j + 1];
+            }
+            g_wifi_cfg->var_count--;
+            wifi_cfg_nvs_save_vars(g_wifi_cfg->vars, g_wifi_cfg->var_count);
+            wifi_cfg_unlock();
+            
+            wifi_cfg_event_post(WIFI_CFG_EVENT_VAR_CHANGED, &var, sizeof(var));
+            return ESP_OK;
+        }
+    }
+    
+    wifi_cfg_unlock();
+    return ESP_ERR_NOT_FOUND;
+}

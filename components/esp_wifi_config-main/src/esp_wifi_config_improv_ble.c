@@ -1,0 +1,895 @@
+/**
+ * @file esp_wifi_config_improv_ble.c
+ * @brief Improv WiFi BLE transport — GATT service definition and characteristic handlers
+ *
+ * Provides the Improv BLE GATT service (UUID 00467768-6228-2272-4663-277478268000)
+ * with 5 characteristics. Bridges characteristic writes to the protocol core
+ * and state changes to BLE notifications.
+ *
+ * This transport delegates GATT registration to the existing BLE backends
+ * (NimBLE / Bluedroid) so both the custom service (0xFFE0) and Improv service
+ * are advertised from the same BLE stack instance.
+ *
+ * Reference: https://www.improv-wifi.com/ble/
+ */
+
+#include "esp_wifi_config_build.h"
+
+// Note: CONFIG_WIFI_CFG_ENABLE_IMPROV is derived from the transport flags inside
+// esp_wifi_config_priv.h, but priv.h hasn't been included yet at this point —
+// gate on the transport flag directly (which always implies IMPROV).
+#if defined(CONFIG_WIFI_CFG_ENABLE_IMPROV_BLE)
+
+#include "esp_wifi_config_improv.h"
+#include "esp_wifi_config_priv.h"
+#include "esp_log.h"
+#include <string.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#if WIFI_CFG_ARDUINO_NIMBLE
+#include "freertos/semphr.h"
+#include "esp_wifi_config_ble_int.h"
+static SemaphoreHandle_t s_cmd_stopped;
+#endif
+
+static const char *TAG = "wifi_cfg_improv_ble";
+
+// =============================================================================
+// Command queue (process RPC off the BLE stack context)
+// =============================================================================
+
+#define IMPROV_BLE_CMD_QUEUE_DEPTH  2
+#define IMPROV_BLE_CMD_TASK_STACK   4096
+
+/*
+ * What one notification on this link can hold.
+ *
+ * A notification is an ATT PDU: one opcode byte, two handle bytes, then the
+ * value -- so the value is three bytes under the negotiated MTU. Inside that
+ * value sits an Improv RPC result: a command byte, a length byte, the payload,
+ * and the checksum ble_response_cb() appends. Six bytes of overhead in total,
+ * and what is left is all the payload a response may carry.
+ *
+ * Neither number is a constant. The MTU is whatever this particular client
+ * agreed to: the library asks for 517 and a desktop or phone client generally
+ * agrees, but a client that settles lower -- 247 is common -- leaves less room
+ * than a result can express, and an unnegotiated link stays at 23. Measured on
+ * the bench 2026-08-22: BlueZ negotiates the full 517, so the budget there is
+ * the format's own 255 and this bound never binds. It binds on the clients
+ * that cannot be measured from here, which is the reason it exists.
+ */
+#define IMPROV_BLE_ATT_MTU_MIN      23  /**< ATT default; every link has this. */
+#define IMPROV_BLE_NOTIFY_OVERHEAD   3  /**< ATT opcode + attribute handle. */
+#define IMPROV_BLE_RESULT_OVERHEAD   3  /**< command + length + spec checksum. */
+
+typedef struct {
+    uint8_t *data;
+    uint16_t length;
+} improv_ble_cmd_msg_t;
+
+static QueueHandle_t s_cmd_queue = NULL;
+static TaskHandle_t  s_cmd_task  = NULL;
+
+// Latest RPC result — stored so the client can read the RPC Result
+// characteristic after writing a command (the spec-defined flow).
+// Written by improv_ble_cmd_task, read by the NimBLE host task —
+// volatile ensures cross-task visibility.
+//
+// Sized to what the core can hand over: an RPC result is a command byte, a
+// length byte and up to IMPROV_RPC_MAX_PAYLOAD of payload, plus the one
+// checksum byte ble_response_cb() appends.
+static volatile uint8_t  s_rpc_result[2 + IMPROV_RPC_MAX_PAYLOAD + 1];
+static volatile uint16_t s_rpc_result_len = 0;
+
+#if WIFI_CFG_ARDUINO_NIMBLE
+#include "esp_wifi_config_nimble_arduino.h"
+
+esp_err_t wifi_cfg_nimble_improv_enqueue(const uint8_t *data, size_t length)
+{
+    if (!s_cmd_queue || !data || !length || length > 512) return ESP_ERR_INVALID_ARG;
+    uint8_t *copy = malloc(length);
+    if (!copy) return ESP_ERR_NO_MEM;
+    memcpy(copy, data, length);
+    improv_ble_cmd_msg_t msg = { .data = copy, .length = length };
+    if (xQueueSend(s_cmd_queue, &msg, 0) != pdTRUE) {
+        free(copy);
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+#endif
+
+// =============================================================================
+// NimBLE backend
+// =============================================================================
+
+#if !WIFI_CFG_ARDUINO_NIMBLE && defined(CONFIG_BT_NIMBLE_ENABLED)
+
+#include "host/ble_hs.h"
+#include "host/ble_gatt.h"
+#include "host/ble_uuid.h"
+
+// 128-bit UUIDs for NimBLE
+static const ble_uuid128_t s_improv_svc_uuid = BLE_UUID128_INIT(
+    0x00, 0x80, 0x26, 0x78, 0x74, 0x27, 0x63, 0x46,
+    0x72, 0x22, 0x28, 0x62, 0x68, 0x77, 0x46, 0x00);
+
+static const ble_uuid128_t s_char_state_uuid = BLE_UUID128_INIT(
+    0x01, 0x80, 0x26, 0x78, 0x74, 0x27, 0x63, 0x46,
+    0x72, 0x22, 0x28, 0x62, 0x68, 0x77, 0x46, 0x00);
+
+static const ble_uuid128_t s_char_error_uuid = BLE_UUID128_INIT(
+    0x02, 0x80, 0x26, 0x78, 0x74, 0x27, 0x63, 0x46,
+    0x72, 0x22, 0x28, 0x62, 0x68, 0x77, 0x46, 0x00);
+
+static const ble_uuid128_t s_char_rpc_cmd_uuid = BLE_UUID128_INIT(
+    0x03, 0x80, 0x26, 0x78, 0x74, 0x27, 0x63, 0x46,
+    0x72, 0x22, 0x28, 0x62, 0x68, 0x77, 0x46, 0x00);
+
+static const ble_uuid128_t s_char_rpc_result_uuid = BLE_UUID128_INIT(
+    0x04, 0x80, 0x26, 0x78, 0x74, 0x27, 0x63, 0x46,
+    0x72, 0x22, 0x28, 0x62, 0x68, 0x77, 0x46, 0x00);
+
+static const ble_uuid128_t s_char_capabilities_uuid = BLE_UUID128_INIT(
+    0x05, 0x80, 0x26, 0x78, 0x74, 0x27, 0x63, 0x46,
+    0x72, 0x22, 0x28, 0x62, 0x68, 0x77, 0x46, 0x00);
+
+static uint16_t s_state_val_handle;
+static uint16_t s_error_val_handle;
+static uint16_t s_rpc_result_val_handle;
+static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+
+// Forward declarations for access callbacks
+static int improv_state_access(uint16_t conn, uint16_t attr,
+                               struct ble_gatt_access_ctxt *ctxt, void *arg);
+static int improv_error_access(uint16_t conn, uint16_t attr,
+                               struct ble_gatt_access_ctxt *ctxt, void *arg);
+static int improv_rpc_cmd_access(uint16_t conn, uint16_t attr,
+                                 struct ble_gatt_access_ctxt *ctxt, void *arg);
+static int improv_rpc_result_access(uint16_t conn, uint16_t attr,
+                                    struct ble_gatt_access_ctxt *ctxt, void *arg);
+static int improv_capabilities_access(uint16_t conn, uint16_t attr,
+                                      struct ble_gatt_access_ctxt *ctxt, void *arg);
+
+// GATT service definition (exported for NimBLE backend to merge)
+const struct ble_gatt_svc_def wifi_cfg_improv_nimble_svcs[] = {
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &s_improv_svc_uuid.u,
+        .characteristics = (struct ble_gatt_chr_def[]) {
+            {
+                // Current State (read + notify)
+                .uuid = &s_char_state_uuid.u,
+                .access_cb = improv_state_access,
+                .val_handle = &s_state_val_handle,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+            },
+            {
+                // Error State (read + notify)
+                .uuid = &s_char_error_uuid.u,
+                .access_cb = improv_error_access,
+                .val_handle = &s_error_val_handle,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+            },
+            {
+                // RPC Command (write + write-no-rsp)
+                .uuid = &s_char_rpc_cmd_uuid.u,
+                .access_cb = improv_rpc_cmd_access,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+            },
+            {
+                // RPC Result (read + notify)
+                .uuid = &s_char_rpc_result_uuid.u,
+                .access_cb = improv_rpc_result_access,
+                .val_handle = &s_rpc_result_val_handle,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+            },
+            {
+                // Capabilities (read)
+                .uuid = &s_char_capabilities_uuid.u,
+                .access_cb = improv_capabilities_access,
+                .flags = BLE_GATT_CHR_F_READ,
+            },
+            { 0 }, // Terminator
+        },
+    },
+    { 0 }, // Terminator
+};
+
+static int improv_state_access(uint16_t conn, uint16_t attr,
+                               struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        uint8_t state = wifi_cfg_improv_get_state();
+        os_mbuf_append(ctxt->om, &state, 1);
+        return 0;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
+static int improv_error_access(uint16_t conn, uint16_t attr,
+                               struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        uint8_t error = wifi_cfg_improv_get_error();
+        os_mbuf_append(ctxt->om, &error, 1);
+        return 0;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
+static int improv_rpc_cmd_access(uint16_t conn, uint16_t attr,
+                                 struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        uint16_t om_len = OS_MBUF_PKTLEN(ctxt->om);
+        if (om_len == 0 || om_len > 512) {
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+
+        if (!s_cmd_queue) {
+            ESP_LOGE(TAG, "Command queue not initialized");
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+
+        uint8_t *buf = malloc(om_len);
+        if (!buf) return BLE_ATT_ERR_INSUFFICIENT_RES;
+
+        uint16_t len = om_len;
+        int rc = ble_hs_mbuf_to_flat(ctxt->om, buf, len, &len);
+        if (rc != 0) {
+            free(buf);
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+
+        improv_ble_cmd_msg_t msg = { .data = buf, .length = len };
+        if (xQueueSend(s_cmd_queue, &msg, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "Command queue full");
+            free(buf);
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        return 0;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
+static int improv_rpc_result_access(uint16_t conn, uint16_t attr,
+                                    struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        uint16_t len = s_rpc_result_len;
+        if (len > 0) {
+            os_mbuf_append(ctxt->om, (const void *)s_rpc_result, len);
+        }
+        return 0;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
+static int improv_capabilities_access(uint16_t conn, uint16_t attr,
+                                      struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        uint8_t caps = wifi_cfg_improv_get_capabilities();
+        os_mbuf_append(ctxt->om, &caps, 1);
+        return 0;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
+// Notify helpers (NimBLE)
+static void nimble_notify_state(void)
+{
+    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) return;
+    uint8_t state = wifi_cfg_improv_get_state();
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(&state, 1);
+    if (om) ble_gatts_notify_custom(s_conn_handle, s_state_val_handle, om);
+}
+
+static void nimble_notify_error(void)
+{
+    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) return;
+    uint8_t error = wifi_cfg_improv_get_error();
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(&error, 1);
+    if (om) ble_gatts_notify_custom(s_conn_handle, s_error_val_handle, om);
+}
+
+static void nimble_notify_rpc_result(const uint8_t *data, size_t len)
+{
+    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        ESP_LOGW(TAG, "RPC result notify skipped — no connection");
+        return;
+    }
+    uint16_t mtu = ble_att_mtu(s_conn_handle);
+    ESP_LOGD(TAG, "Sending RPC result: %zu bytes (MTU=%d, max_notify=%d)",
+             len, mtu, mtu - 3);
+
+    /*
+     * NimBLE does not reject an over-long notification -- ble_att_tx_with_conn()
+     * calls ble_att_truncate_to_mtu() and sends whatever fits, returning 0. The
+     * client then gets a result whose length byte describes more bytes than
+     * arrived, which reads as a device that speaks the protocol badly rather
+     * than as a link that is too narrow. Say so here instead; the packer is
+     * supposed to have made this unreachable.
+     */
+    if (mtu > 3 && len > (size_t)(mtu - 3)) {
+        ESP_LOGE(TAG, "RPC result is %u bytes but this link carries %u per "
+                      "notification; NimBLE will truncate it",
+                 (unsigned)len, (unsigned)(mtu - 3));
+    }
+
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
+    if (!om) {
+        /* Silence here was indistinguishable from the device ignoring the
+         * command. */
+        ESP_LOGE(TAG, "RPC result notify dropped: no mbuf for %u bytes",
+                 (unsigned)len);
+        return;
+    }
+    int rc = ble_gatts_notify_custom(s_conn_handle, s_rpc_result_val_handle, om);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "RPC result notify failed, rc=%d", rc);
+    }
+}
+
+// Connection tracking (called from the NimBLE backend's GAP handler)
+void wifi_cfg_improv_ble_on_connect_nimble(uint16_t conn_handle)
+{
+    s_conn_handle = conn_handle;
+
+    // Do NOT send unsolicited notifications here.  On first connect
+    // Chrome hasn't discovered services yet so it ignores them.  But
+    // on reconnect Chrome has cached handle→characteristic mappings,
+    // and receiving notifications before startNotifications() is called
+    // confuses Chrome's Web Bluetooth state machine, causing the
+    // subsequent readValue() calls to hang until the supervision
+    // timeout fires.  The Improv SDK reads the initial state explicitly
+    // after subscribing — no push needed.
+}
+
+void wifi_cfg_improv_ble_on_disconnect_nimble(void)
+{
+    s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+}
+
+#endif // CONFIG_BT_NIMBLE_ENABLED
+
+// =============================================================================
+// Bluedroid backend
+// =============================================================================
+
+#if !WIFI_CFG_ARDUINO_NIMBLE && defined(CONFIG_BT_BLUEDROID_ENABLED)
+
+#include "esp_gap_ble_api.h"
+#include "esp_gatts_api.h"
+#include "esp_bt_main.h"
+
+#define IMPROV_PROFILE_APP_ID  1  // Different from custom BLE's app 0
+
+enum {
+    IMPROV_IDX_SVC,
+    IMPROV_IDX_CHAR_STATE,
+    IMPROV_IDX_CHAR_STATE_VAL,
+    IMPROV_IDX_CHAR_STATE_CCC,
+    IMPROV_IDX_CHAR_ERROR,
+    IMPROV_IDX_CHAR_ERROR_VAL,
+    IMPROV_IDX_CHAR_ERROR_CCC,
+    IMPROV_IDX_CHAR_RPC_CMD,
+    IMPROV_IDX_CHAR_RPC_CMD_VAL,
+    IMPROV_IDX_CHAR_RPC_RESULT,
+    IMPROV_IDX_CHAR_RPC_RESULT_VAL,
+    IMPROV_IDX_CHAR_RPC_RESULT_CCC,
+    IMPROV_IDX_CHAR_CAPABILITIES,
+    IMPROV_IDX_CHAR_CAPABILITIES_VAL,
+    IMPROV_IDX_NB,
+};
+
+static uint16_t improv_handle_table[IMPROV_IDX_NB];
+
+static const uint16_t primary_service_uuid = ESP_GATT_UUID_PRI_SERVICE;
+static const uint16_t character_declaration_uuid = ESP_GATT_UUID_CHAR_DECLARE;
+static const uint16_t character_client_config_uuid = ESP_GATT_UUID_CHAR_CLIENT_CONFIG;
+
+static const uint8_t char_prop_read         = ESP_GATT_CHAR_PROP_BIT_READ;
+static const uint8_t char_prop_read_notify  = ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY;
+static const uint8_t char_prop_write        = ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_WRITE_NR;
+
+// 128-bit service UUID in little-endian for Bluedroid
+static const uint8_t improv_svc_uuid128[16] = IMPROV_BLE_SVC_UUID_128;
+static const uint8_t improv_char_state_uuid128[16] = IMPROV_BLE_CHAR_STATE_UUID_128;
+static const uint8_t improv_char_error_uuid128[16] = IMPROV_BLE_CHAR_ERROR_UUID_128;
+static const uint8_t improv_char_rpc_cmd_uuid128[16] = IMPROV_BLE_CHAR_RPC_CMD_UUID_128;
+static const uint8_t improv_char_rpc_result_uuid128[16] = IMPROV_BLE_CHAR_RPC_RESULT_UUID_128;
+static const uint8_t improv_char_capabilities_uuid128[16] = IMPROV_BLE_CHAR_CAPABILITIES_UUID_128;
+
+static uint8_t improv_state_ccc[2] = {0};
+static uint8_t improv_error_ccc[2] = {0};
+static uint8_t improv_result_ccc[2] = {0};
+
+static const esp_gatts_attr_db_t improv_gatt_db[IMPROV_IDX_NB] = {
+    // Service
+    [IMPROV_IDX_SVC] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&primary_service_uuid, ESP_GATT_PERM_READ,
+         16, sizeof(improv_svc_uuid128), (uint8_t *)improv_svc_uuid128}
+    },
+
+    // Current State
+    [IMPROV_IDX_CHAR_STATE] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid, ESP_GATT_PERM_READ,
+         1, 1, (uint8_t *)&char_prop_read_notify}
+    },
+    [IMPROV_IDX_CHAR_STATE_VAL] = {
+        {ESP_GATT_RSP_BY_APP},
+        {ESP_UUID_LEN_128, (uint8_t *)improv_char_state_uuid128, ESP_GATT_PERM_READ,
+         1, 0, NULL}
+    },
+    [IMPROV_IDX_CHAR_STATE_CCC] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_client_config_uuid,
+         ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+         2, 2, improv_state_ccc}
+    },
+
+    // Error State
+    [IMPROV_IDX_CHAR_ERROR] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid, ESP_GATT_PERM_READ,
+         1, 1, (uint8_t *)&char_prop_read_notify}
+    },
+    [IMPROV_IDX_CHAR_ERROR_VAL] = {
+        {ESP_GATT_RSP_BY_APP},
+        {ESP_UUID_LEN_128, (uint8_t *)improv_char_error_uuid128, ESP_GATT_PERM_READ,
+         1, 0, NULL}
+    },
+    [IMPROV_IDX_CHAR_ERROR_CCC] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_client_config_uuid,
+         ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+         2, 2, improv_error_ccc}
+    },
+
+    // RPC Command
+    [IMPROV_IDX_CHAR_RPC_CMD] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid, ESP_GATT_PERM_READ,
+         1, 1, (uint8_t *)&char_prop_write}
+    },
+    [IMPROV_IDX_CHAR_RPC_CMD_VAL] = {
+        {ESP_GATT_RSP_BY_APP},
+        {ESP_UUID_LEN_128, (uint8_t *)improv_char_rpc_cmd_uuid128, ESP_GATT_PERM_WRITE,
+         512, 0, NULL}
+    },
+
+    // RPC Result
+    [IMPROV_IDX_CHAR_RPC_RESULT] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid, ESP_GATT_PERM_READ,
+         1, 1, (uint8_t *)&char_prop_read_notify}
+    },
+    [IMPROV_IDX_CHAR_RPC_RESULT_VAL] = {
+        {ESP_GATT_RSP_BY_APP},
+        {ESP_UUID_LEN_128, (uint8_t *)improv_char_rpc_result_uuid128, ESP_GATT_PERM_READ,
+         512, 0, NULL}
+    },
+    [IMPROV_IDX_CHAR_RPC_RESULT_CCC] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_client_config_uuid,
+         ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+         2, 2, improv_result_ccc}
+    },
+
+    // Capabilities
+    [IMPROV_IDX_CHAR_CAPABILITIES] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid, ESP_GATT_PERM_READ,
+         1, 1, (uint8_t *)&char_prop_read}
+    },
+    [IMPROV_IDX_CHAR_CAPABILITIES_VAL] = {
+        {ESP_GATT_RSP_BY_APP},
+        {ESP_UUID_LEN_128, (uint8_t *)improv_char_capabilities_uuid128, ESP_GATT_PERM_READ,
+         1, 0, NULL}
+    },
+};
+
+static struct {
+    esp_gatt_if_t gatts_if;
+    uint16_t conn_id;
+    bool connected;
+} s_bd_profile = {
+    .gatts_if = ESP_GATT_IF_NONE,
+    .connected = false,
+};
+
+/** Negotiated ATT MTU for the current connection. */
+static uint16_t s_bd_mtu = IMPROV_BLE_ATT_MTU_MIN;
+
+void improv_bd_gatts_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
+                              esp_ble_gatts_cb_param_t *param)
+{
+    // Only handle events for our interface
+    if (event == ESP_GATTS_REG_EVT) {
+        if (param->reg.app_id != IMPROV_PROFILE_APP_ID) return;
+        s_bd_profile.gatts_if = gatts_if;
+        esp_ble_gatts_create_attr_tab(improv_gatt_db, gatts_if, IMPROV_IDX_NB, 1);
+        return;
+    }
+
+    if (gatts_if != s_bd_profile.gatts_if && gatts_if != ESP_GATT_IF_NONE) return;
+
+    switch (event) {
+        case ESP_GATTS_CREAT_ATTR_TAB_EVT:
+            if (param->add_attr_tab.status == ESP_GATT_OK &&
+                param->add_attr_tab.num_handle == IMPROV_IDX_NB) {
+                memcpy(improv_handle_table, param->add_attr_tab.handles,
+                       sizeof(improv_handle_table));
+                esp_ble_gatts_start_service(improv_handle_table[IMPROV_IDX_SVC]);
+                ESP_LOGI(TAG, "Improv GATT service started (Bluedroid)");
+            }
+            break;
+
+        case ESP_GATTS_CONNECT_EVT:
+            s_bd_profile.conn_id = param->connect.conn_id;
+            s_bd_profile.connected = true;
+            /* Until the client asks for more, this is the ATT default. The
+             * scan packer needs the real number, so start from the honest
+             * one rather than an optimistic one. */
+            s_bd_mtu = IMPROV_BLE_ATT_MTU_MIN;
+            break;
+
+        case ESP_GATTS_MTU_EVT:
+            s_bd_mtu = param->mtu.mtu;
+            ESP_LOGD(TAG, "ATT MTU negotiated: %u", (unsigned)s_bd_mtu);
+            break;
+
+        case ESP_GATTS_DISCONNECT_EVT:
+            s_bd_profile.connected = false;
+            break;
+
+        case ESP_GATTS_READ_EVT:
+            if (param->read.handle == improv_handle_table[IMPROV_IDX_CHAR_STATE_VAL]) {
+                esp_gatt_rsp_t rsp = {0};
+                rsp.attr_value.len = 1;
+                rsp.attr_value.value[0] = wifi_cfg_improv_get_state();
+                esp_ble_gatts_send_response(gatts_if, param->read.conn_id,
+                                            param->read.trans_id, ESP_GATT_OK, &rsp);
+            } else if (param->read.handle == improv_handle_table[IMPROV_IDX_CHAR_ERROR_VAL]) {
+                esp_gatt_rsp_t rsp = {0};
+                rsp.attr_value.len = 1;
+                rsp.attr_value.value[0] = wifi_cfg_improv_get_error();
+                esp_ble_gatts_send_response(gatts_if, param->read.conn_id,
+                                            param->read.trans_id, ESP_GATT_OK, &rsp);
+            } else if (param->read.handle == improv_handle_table[IMPROV_IDX_CHAR_CAPABILITIES_VAL]) {
+                esp_gatt_rsp_t rsp = {0};
+                rsp.attr_value.len = 1;
+                rsp.attr_value.value[0] = wifi_cfg_improv_get_capabilities();
+                esp_ble_gatts_send_response(gatts_if, param->read.conn_id,
+                                            param->read.trans_id, ESP_GATT_OK, &rsp);
+            } else if (param->read.handle == improv_handle_table[IMPROV_IDX_CHAR_RPC_RESULT_VAL]) {
+                esp_gatt_rsp_t rsp = {0};
+                uint16_t copy = s_rpc_result_len;
+                if (copy > sizeof(rsp.attr_value.value)) {
+                    copy = sizeof(rsp.attr_value.value);
+                }
+                rsp.attr_value.len = copy;
+                if (copy > 0) {
+                    memcpy(rsp.attr_value.value, (const void *)s_rpc_result, copy);
+                }
+                esp_ble_gatts_send_response(gatts_if, param->read.conn_id,
+                                            param->read.trans_id, ESP_GATT_OK, &rsp);
+            }
+            break;
+
+        case ESP_GATTS_WRITE_EVT:
+            if (!param->write.is_prep &&
+                param->write.handle == improv_handle_table[IMPROV_IDX_CHAR_RPC_CMD_VAL]) {
+                // Queue command for processing
+                uint8_t *buf = malloc(param->write.len);
+                if (buf) {
+                    memcpy(buf, param->write.value, param->write.len);
+                    improv_ble_cmd_msg_t msg = { .data = buf, .length = param->write.len };
+                    if (xQueueSend(s_cmd_queue, &msg, 0) != pdTRUE) {
+                        free(buf);
+                    }
+                }
+                if (param->write.need_rsp) {
+                    esp_ble_gatts_send_response(gatts_if, param->write.conn_id,
+                                                param->write.trans_id, ESP_GATT_OK, NULL);
+                }
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
+// Notify helpers (Bluedroid)
+static void bd_notify_state(void)
+{
+    if (!s_bd_profile.connected || s_bd_profile.gatts_if == ESP_GATT_IF_NONE) return;
+    uint8_t state = wifi_cfg_improv_get_state();
+    esp_ble_gatts_send_indicate(s_bd_profile.gatts_if, s_bd_profile.conn_id,
+                                improv_handle_table[IMPROV_IDX_CHAR_STATE_VAL],
+                                1, &state, false);
+}
+
+static void bd_notify_error(void)
+{
+    if (!s_bd_profile.connected || s_bd_profile.gatts_if == ESP_GATT_IF_NONE) return;
+    uint8_t error = wifi_cfg_improv_get_error();
+    esp_ble_gatts_send_indicate(s_bd_profile.gatts_if, s_bd_profile.conn_id,
+                                improv_handle_table[IMPROV_IDX_CHAR_ERROR_VAL],
+                                1, &error, false);
+}
+
+static void bd_notify_rpc_result(const uint8_t *data, size_t len)
+{
+    if (!s_bd_profile.connected || s_bd_profile.gatts_if == ESP_GATT_IF_NONE) return;
+    esp_ble_gatts_send_indicate(s_bd_profile.gatts_if, s_bd_profile.conn_id,
+                                improv_handle_table[IMPROV_IDX_CHAR_RPC_RESULT_VAL],
+                                len, (uint8_t *)data, false);
+}
+
+#endif // CONFIG_BT_BLUEDROID_ENABLED
+
+// =============================================================================
+// RPC response callback (protocol core -> BLE notify)
+// =============================================================================
+
+static void ble_response_cb(uint8_t type, const uint8_t *data, size_t len)
+{
+    // Improv BLE spec requires an LSB checksum as the final byte of the
+    // RPC result.  The protocol core doesn't add one (serial has its own
+    // transport-level checksum), so we append it here.
+    if (len + 1 > sizeof(s_rpc_result)) return;
+
+    memcpy((void *)s_rpc_result, data, len);
+    s_rpc_result[len] = improv_checksum(data, len);
+    s_rpc_result_len = (uint16_t)(len + 1);
+
+    // Store the result for characteristic reads (spec-defined flow) and
+    // also send a notification for clients that subscribe to it.
+    uint16_t result_len = s_rpc_result_len;
+#if WIFI_CFG_ARDUINO_NIMBLE
+    wifi_cfg_nimble_improv_result((const uint8_t *)s_rpc_result, result_len);
+#elif defined(CONFIG_BT_NIMBLE_ENABLED)
+    nimble_notify_rpc_result((const uint8_t *)s_rpc_result, result_len);
+#elif !WIFI_CFG_ARDUINO_NIMBLE && defined(CONFIG_BT_BLUEDROID_ENABLED)
+    bd_notify_rpc_result((const uint8_t *)s_rpc_result, result_len);
+#endif
+}
+
+// =============================================================================
+// State change callback (push state/error notifications)
+// =============================================================================
+
+static void ble_state_change_cb(improv_state_t state, improv_error_t error)
+{
+#if WIFI_CFG_ARDUINO_NIMBLE
+    wifi_cfg_nimble_improv_state(state, error);
+#elif defined(CONFIG_BT_NIMBLE_ENABLED)
+    nimble_notify_state();
+    if (error != IMPROV_ERROR_NONE) nimble_notify_error();
+#elif !WIFI_CFG_ARDUINO_NIMBLE && defined(CONFIG_BT_BLUEDROID_ENABLED)
+    bd_notify_state();
+    if (error != IMPROV_ERROR_NONE) bd_notify_error();
+#endif
+}
+
+// =============================================================================
+// Command processing task
+// =============================================================================
+
+/*
+ * Improv frames an RPC command as [command, data_length, ...data, checksum],
+ * the checksum a plain sum of everything before it keeping only the LSB
+ * (https://www.improv-wifi.com/ble/). It is the only integrity check the
+ * protocol has above the link layer.
+ *
+ * Validated here rather than in the protocol core because the core is shared
+ * with Improv Serial, which has its own transport-level checksum and frames
+ * differently. ble_response_cb() below already appends a checksum to every
+ * result for the same reason; this is the missing half of that pair.
+ *
+ * Both host stacks reach this through s_cmd_queue, so one check covers
+ * NimBLE and Bluedroid.
+ */
+static bool improv_ble_frame_valid(const uint8_t *data, size_t len)
+{
+    if (len < 3) {
+        ESP_LOGW(TAG, "RPC command too short: %u bytes", (unsigned)len);
+        return false;
+    }
+
+    /* Header is 2 bytes, then data[1] payload bytes, then 1 checksum byte.
+     * Exact equality, so a frame that omits the checksum is rejected rather
+     * than silently treated as one whose last payload byte is the checksum. */
+    if ((size_t)data[1] + 3u != len) {
+        ESP_LOGW(TAG, "RPC command length mismatch: header claims %u payload "
+                      "bytes, frame is %u", (unsigned)data[1], (unsigned)len);
+        return false;
+    }
+
+    uint8_t checksum = improv_checksum(data, len - 1);
+    if (checksum != data[len - 1]) {
+        ESP_LOGW(TAG, "RPC command checksum: got 0x%02x, computed 0x%02x",
+                 data[len - 1], checksum);
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief Payload budget for one RPC result, from the live connection.
+ *
+ * Never zero: the API reads zero as "no transport limit", and the whole point
+ * here is that there is one.
+ */
+static size_t improv_ble_max_result_payload(void)
+{
+    uint16_t mtu = 0;
+
+#if WIFI_CFG_ARDUINO_NIMBLE
+    mtu = wifi_cfg_nimble_improv_mtu();
+#elif defined(CONFIG_BT_NIMBLE_ENABLED)
+    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        mtu = ble_att_mtu(s_conn_handle);
+    }
+#elif !WIFI_CFG_ARDUINO_NIMBLE && defined(CONFIG_BT_BLUEDROID_ENABLED)
+    if (s_bd_profile.connected) {
+        mtu = s_bd_mtu;
+    }
+#endif
+
+    /* ble_att_mtu() returns 0 for a handle it does not know, and a stack that
+     * has not exchanged MTUs yet reports the default. Both mean "assume the
+     * least this link could be". */
+    if (mtu < IMPROV_BLE_ATT_MTU_MIN) mtu = IMPROV_BLE_ATT_MTU_MIN;
+
+    size_t budget = (size_t)mtu - IMPROV_BLE_NOTIFY_OVERHEAD
+                                - IMPROV_BLE_RESULT_OVERHEAD;
+    if (budget > IMPROV_RPC_MAX_PAYLOAD) budget = IMPROV_RPC_MAX_PAYLOAD;
+    return budget;
+}
+
+static void improv_ble_cmd_task(void *param)
+{
+    improv_ble_cmd_msg_t msg;
+    while (xQueueReceive(s_cmd_queue, &msg, portMAX_DELAY) == pdTRUE) {
+        if (!msg.data) break;
+        if (improv_ble_frame_valid(msg.data, msg.length)) {
+            /* BLE spec: one RPC Response holding every network -- as many of
+             * them as this connection's MTU leaves room for. */
+            wifi_cfg_improv_handle_rpc(msg.data, msg.length, ble_response_cb,
+                                       IMPROV_RPC_STYLE_SINGLE,
+                                       improv_ble_max_result_payload());
+        } else {
+            /* Reported the same way the core reports its own frame errors, so
+             * a client sees one error code for "that frame was not usable"
+             * regardless of which layer noticed. */
+            wifi_cfg_improv_set_error(IMPROV_ERROR_INVALID_RPC);
+        }
+        free(msg.data);
+    }
+#if WIFI_CFG_ARDUINO_NIMBLE
+    xSemaphoreGive(s_cmd_stopped);
+#endif
+    vTaskDelete(NULL);
+}
+
+// =============================================================================
+// Transport API
+// =============================================================================
+
+esp_err_t wifi_cfg_improv_ble_init(void)
+{
+    ESP_LOGI(TAG, "Initializing Improv BLE");
+
+    s_cmd_queue = xQueueCreate(IMPROV_BLE_CMD_QUEUE_DEPTH, sizeof(improv_ble_cmd_msg_t));
+    if (!s_cmd_queue) return ESP_ERR_NO_MEM;
+
+#if WIFI_CFG_ARDUINO_NIMBLE
+    s_cmd_stopped = xSemaphoreCreateBinary();
+    if (!s_cmd_stopped) {
+        vQueueDelete(s_cmd_queue);
+        s_cmd_queue = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+#endif
+    BaseType_t ret = xTaskCreate(improv_ble_cmd_task, "improv_ble", IMPROV_BLE_CMD_TASK_STACK,
+                                  NULL, 5, &s_cmd_task);
+    if (ret != pdPASS) {
+#if WIFI_CFG_ARDUINO_NIMBLE
+        vSemaphoreDelete(s_cmd_stopped);
+        s_cmd_stopped = NULL;
+#endif
+        vQueueDelete(s_cmd_queue);
+        s_cmd_queue = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
+    wifi_cfg_improv_register_state_cb(ble_state_change_cb);
+
+#if !WIFI_CFG_ARDUINO_NIMBLE && defined(CONFIG_BT_BLUEDROID_ENABLED)
+    // Register Improv GATT app. The GATTS callback is already registered by the
+    // custom BLE backend — we do NOT re-register it here (Bluedroid supports only
+    // one global GATTS callback). Instead, the custom backend's handler will
+    // ignore events for gatts_if it doesn't own, and we install a profile-based
+    // dispatcher. We register a second app; Bluedroid dispatches events to
+    // the single callback with the appropriate gatts_if per app.
+    //
+    // The improv handler filters by app_id in ESP_GATTS_REG_EVT and by gatts_if
+    // for all other events, so it will only process its own events.
+    //
+    // We must hook into the existing callback chain. We do this by registering
+    // our app — the existing global callback will receive events for both apps,
+    // but will ignore events for gatts_if != its own.
+    esp_ble_gatts_app_register(IMPROV_PROFILE_APP_ID);
+#endif
+
+    // NimBLE registration happens in the backend file via wifi_cfg_improv_nimble_svcs
+
+    return ESP_OK;
+}
+
+esp_err_t wifi_cfg_improv_ble_deinit(void)
+{
+    ESP_LOGI(TAG, "Deinitializing Improv BLE");
+
+#if !WIFI_CFG_ARDUINO_NIMBLE && defined(CONFIG_BT_BLUEDROID_ENABLED)
+    if (s_bd_profile.gatts_if != ESP_GATT_IF_NONE) {
+        esp_ble_gatts_app_unregister(s_bd_profile.gatts_if);
+        s_bd_profile.gatts_if = ESP_GATT_IF_NONE;
+    }
+#endif
+
+#if WIFI_CFG_ARDUINO_NIMBLE
+    // Stop and join GATT callbacks before freeing the queue they can write to.
+    esp_err_t err = wifi_cfg_ble_backend_deinit();
+    if (err != ESP_OK) return err;
+#endif
+    if (s_cmd_task) {
+#if WIFI_CFG_ARDUINO_NIMBLE
+        // Let an in-flight RPC release its allocations and notification mutex.
+        improv_ble_cmd_msg_t stop = {0};
+        xQueueSend(s_cmd_queue, &stop, portMAX_DELAY);
+        xSemaphoreTake(s_cmd_stopped, portMAX_DELAY);
+        vSemaphoreDelete(s_cmd_stopped);
+        s_cmd_stopped = NULL;
+#else
+        vTaskDelete(s_cmd_task);
+#endif
+        s_cmd_task = NULL;
+    }
+    if (s_cmd_queue) {
+        improv_ble_cmd_msg_t msg;
+        while (xQueueReceive(s_cmd_queue, &msg, 0) == pdTRUE) {
+            free(msg.data);
+        }
+        vQueueDelete(s_cmd_queue);
+        s_cmd_queue = NULL;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t wifi_cfg_improv_ble_start(void)
+{
+    ESP_LOGI(TAG, "Improv BLE started");
+    // Advertising is handled by the main BLE backend — Improv service is
+    // already registered in the GATT table. The backend's start_advertising()
+    // will include both service UUIDs.
+    return ESP_OK;
+}
+
+esp_err_t wifi_cfg_improv_ble_stop(void)
+{
+    ESP_LOGI(TAG, "Improv BLE stopped");
+    return ESP_OK;
+}
+
+#endif // CONFIG_WIFI_CFG_ENABLE_IMPROV_BLE
