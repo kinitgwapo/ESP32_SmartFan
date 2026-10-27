@@ -29,3 +29,9 @@
 
 #define WIFI_CONFIG_QUEUE_LENGTH 1
 #define WIFI_FORM_BUFFER_SIZE    384
+
+static const char *TAG = "Wi-Fi";
+
+static EventGroupHandle_t wifi_event_group;
+static QueueHandle_t wifi_config_queue;
+static httpd_handle_t http_server;
