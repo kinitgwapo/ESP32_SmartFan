@@ -112,9 +112,18 @@ void fan_init(void)
 
 void fan_task(void *pvParameters)
 {
-    while(true) {
-        if(network_is_connected()) {
+    (void)pvParameters;
 
-        } 
+    while (true) {
+        for (int i = 0; i < FAN_SPEED_COUNT; i++) {
+            if (debounce_update(&inputs[i])) {
+                fan_set_speed((fan_speed_t)i);
+            }
+        }
+
+        if (network_is_connected()) {
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_SAMPLE_MS));
     }
 }
