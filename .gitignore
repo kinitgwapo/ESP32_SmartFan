@@ -79,3 +79,5 @@ node_modules/
 
 .vscode/launch.json
 c_cpp_properties.json
+managed_components
+dependencies.lock
