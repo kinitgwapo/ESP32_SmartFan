@@ -19,6 +19,17 @@
 #define OUTPUT_NORMAL GPIO_NUM_26
 #define OUTPUT_HIGH GPIO_NUM_27
 
+#define DEBOUNCE_SAMPLE_MS    10   /* how often the task samples the buttons */
+#define DEBOUNCE_STABLE_COUNT 3    /* samples in a row = 30 ms stable         */
+
+typedef enum {
+    FAN_OFF = 0,
+    FAN_LOW,
+    FAN_NORMAL,
+    FAN_HIGH,
+    FAN_SPEED_COUNT
+} fan_speed_t;
+
 void fan_init(void)
 {
     gpio_config_t input_cfg = {
