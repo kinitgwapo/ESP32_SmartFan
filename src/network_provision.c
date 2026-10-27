@@ -322,4 +322,31 @@ void network_init(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+
+    
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    if (esp_netif_create_default_wifi_sta() == NULL ||
+        esp_netif_create_default_wifi_ap() == NULL) {
+        ESP_LOGE(TAG, "Failed to create default Wi-Fi network interfaces");
+        abort();
+    }
+
+    wifi_init_config_t wifi_init_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&wifi_init_cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+
+    wifi_config_t ap_config = {
+        .ap = {
+            .ssid = AP_NAME,
+            .ssid_len = sizeof(AP_NAME) - 1,
+            .channel = 1,
+            .password = AP_PASSWORD,
+            .max_connection = 4,
+            .authmode = WIFI_AUTH_WPA2_PSK,
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
 }
