@@ -187,5 +187,16 @@ static esp_err_t wifi_post_handler(httpd_req_t *req)
         httpd_resp_set_status(req, "400 Bad Request");
         return httpd_resp_sendstr(req, "SSID is required.");
     }
+    
+    wifi_config_t station_config = {0};
+    memcpy(station_config.sta.ssid, ssid, strlen(ssid));
+    memcpy(station_config.sta.password, password, strlen(password));
+
+    /* Queue the request so Wi-Fi changes happen in the network task. */
+    if (wifi_config_queue == NULL ||
+        xQueueOverwrite(wifi_config_queue, &station_config) != pdPASS) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_sendstr(req, "Wi-Fi configuration is unavailable.");
+    }
     return ESP_OK; 
 }
