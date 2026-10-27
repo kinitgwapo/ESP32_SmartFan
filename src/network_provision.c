@@ -117,3 +117,16 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
 }
+
+static esp_err_t wifi_post_handler(httpd_req_t *req)
+{
+    char body[WIFI_FORM_BUFFER_SIZE] = {0};
+
+    if (req->content_len == 0 ||
+        req->content_len >= sizeof(body)) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "Invalid form size.");
+    }
+
+    return ESP_OK;  /* temporary: replaced in step 8 */
+}
