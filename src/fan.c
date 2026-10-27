@@ -31,5 +31,17 @@ void fan_init(void)
     .intr_type = GPIO_INTR_DISABLE              /*!< GPIO interrupt type                                  */
     };
 
+    gpio_config_t output_cfg = {
+    .pin_bit_mask = BIT64(OUTPUT_OFF) |         /*!< GPIO pin: set with bit mask, each bit maps to a GPIO */
+                    BIT64(OUTPUT_LOW) |
+                    BIT64(OUTPUT_NORMAL) |
+                    BIT64(OUTPUT_HIGH),
+    .mode = GPIO_MODE_OUTPUT,                   /*!< GPIO mode: set input/output mode                     */
+    .pull_up_en = GPIO_PULLUP_DISABLE,          /*!< GPIO pull-up                                         */
+    .pull_down_en = GPIO_PULLDOWN_DISABLE,      /*!< GPIO pull-down                                       */
+    .intr_type = GPIO_INTR_DISABLE              /*!< GPIO interrupt type                                  */
+    };
+    
     ESP_ERROR_CHECK(gpio_config(&input_cfg));
+    ESP_ERROR_CHECK(gpio_config(&output_cfg));
 }
