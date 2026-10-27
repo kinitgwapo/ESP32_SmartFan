@@ -45,3 +45,49 @@ bool network_is_connected(void)
     return (xEventGroupGetBits(wifi_event_group) &
             EVENT_WIFI_CONNECTED) != 0;
 }
+
+static int hex_digit(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Decode a URL-encoded form field in-place. */
+static bool url_decode(char *text)
+{
+    char *read_ptr = text;
+    char *write_ptr = text;
+
+    while (*read_ptr != '\0') {
+        if (*read_ptr == '+') {
+            *write_ptr++ = ' ';
+            read_ptr++;
+        } else if (*read_ptr == '%') {
+            if (read_ptr[1] == '\0' || read_ptr[2] == '\0') {
+                return false;
+            }
+
+            int hi = hex_digit(read_ptr[1]);
+            int lo = hex_digit(read_ptr[2]);
+            if (hi < 0 || lo < 0) {
+                return false;
+            }
+
+            char decoded = (char)((hi << 4) | lo);
+            /* Avoid embedded NUL bytes truncating credential strings. */
+            if (decoded == '\0') {
+                return false;
+            }
+            
+            *write_ptr++ = decoded;
+            read_ptr += 3;
+        } else {
+            *write_ptr++ = *read_ptr++;
+        }
+    }
+
+    *write_ptr = '\0';
+    return true;
+}
