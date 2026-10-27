@@ -128,5 +128,18 @@ static esp_err_t wifi_post_handler(httpd_req_t *req)
         return httpd_resp_sendstr(req, "Invalid form size.");
     }
 
-    return ESP_OK;  /* temporary: replaced in step 8 */
+    size_t received = 0;
+    while (received < req->content_len) {
+        int ret = httpd_req_recv(req,
+                                 body + received,
+                                 req->content_len - received);
+        if (ret <= 0) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            return httpd_resp_sendstr(req, "Could not read form data.");
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    return ESP_OK; 
 }
