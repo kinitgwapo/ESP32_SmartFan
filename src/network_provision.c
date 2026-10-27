@@ -182,5 +182,10 @@ static esp_err_t wifi_post_handler(httpd_req_t *req)
             memcpy(password, value, len);
         }
     }
+    
+    if (!got_ssid) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "SSID is required.");
+    }
     return ESP_OK; 
 }
