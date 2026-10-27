@@ -91,3 +91,29 @@ static bool url_decode(char *text)
     *write_ptr = '\0';
     return true;
 }
+
+static esp_err_t root_get_handler(httpd_req_t *req)
+{
+    static const char html[] =
+        "<!doctype html>"
+        "<html><head><meta name='viewport' "
+        "content='width=device-width,initial-scale=1'>"
+        "<title>ESP32 Wi-Fi Setup</title></head>"
+        "<body style='font-family:sans-serif;max-width:420px;"
+        "margin:40px auto;padding:16px'>"
+        "<h2>ESP32 SmartFan</h2>"
+        "<p>Enter the Wi-Fi network credentials for the ESP32.</p>"
+        "<form method='POST' action='/wifi'>"
+        "<label>Wi-Fi name (SSID)</label><br>"
+        "<input name='ssid' maxlength='32' required "
+        "style='width:100%;padding:10px;box-sizing:border-box'>"
+        "<br><br>"
+        "<label>Wi-Fi password</label><br>"
+        "<input name='password' type='password' maxlength='63' "
+        "style='width:100%;padding:10px;box-sizing:border-box'>"
+        "<br><br><button type='submit'>Save Wi-Fi settings</button>"
+        "</form></body></html>";
+
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
+}
