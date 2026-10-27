@@ -71,6 +71,15 @@ static bool debounce_update(debounced_input_t *input)
     return false;                    /* still waiting for it to settle */
 }
 
+/* Turn all outputs off first, then the selected one on (break before make). */
+static void fan_set_speed(fan_speed_t speed)
+{
+    for (int i = 0; i < FAN_SPEED_COUNT; i++) {
+        gpio_set_level(output_pins[i], 0);
+    }
+    gpio_set_level(output_pins[speed], 1);
+}
+
 void fan_init(void)
 {
     gpio_config_t input_cfg = {
