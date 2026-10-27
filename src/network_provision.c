@@ -35,3 +35,13 @@ static const char *TAG = "Wi-Fi";
 static EventGroupHandle_t wifi_event_group;
 static QueueHandle_t wifi_config_queue;
 static httpd_handle_t http_server;
+
+bool network_is_connected(void)
+{
+    if (wifi_event_group == NULL) {
+        return false;
+    }
+
+    return (xEventGroupGetBits(wifi_event_group) &
+            EVENT_WIFI_CONNECTED) != 0;
+}
