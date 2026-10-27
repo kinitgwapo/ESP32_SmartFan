@@ -21,6 +21,24 @@ void tasks_init() {
     if (result != pdPASS) {
         ESP_LOGE(TAG, "Failed to create network task");
     }
+    
+    /*
+     * Initialize/start your independent fan and sensor tasks here.
+     * They should use network_is_connected() before sending data,
+     * rather than waiting for Wi-Fi.
+     */
+
+    result = xTaskCreate(
+        fan_task,
+        "fan_task",
+        2048,
+        NULL,
+        3,
+        NULL
+    );
+    if(result != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create fan task");
+    }
 }
 
 void app_main() {}
