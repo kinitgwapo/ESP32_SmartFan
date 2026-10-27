@@ -390,3 +390,31 @@ void network_init(void)
     ESP_LOGI(TAG, "Setup AP is available as '%s'", AP_NAME);
     ESP_LOGI(TAG, "Connect to %s and open http://192.168.4.1/", AP_NAME);
 }
+
+void network_task(void *pvParameters)
+{
+    (void)pvParameters;
+
+    network_init();
+
+    for (;;) {
+        /*
+         * Process configuration requests submitted by the browser.
+         * The wait is confined to this task, not the fan/sensor tasks.
+         */
+        wifi_config_t requested_config;
+        if (xQueueReceive(wifi_config_queue,
+                          &requested_config,
+                          pdMS_TO_TICKS(500)) == pdTRUE) {
+            apply_station_config(&requested_config);
+        }
+
+        EventBits_t bits = xEventGroupGetBits(wifi_event_group);
+        if ((bits & EVENT_WIFI_DISCONNECTED) != 0) {
+            xEventGroupClearBits(wifi_event_group,
+                                 EVENT_WIFI_DISCONNECTED);
+            ESP_LOGW(TAG,
+                     "Wi-Fi is offline. Reconfigure at http://192.168.4.1/");
+        }
+    }
+}
