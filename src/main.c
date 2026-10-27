@@ -7,5 +7,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+static const char *TAG = "app_main";
 
 void app_main() {}
