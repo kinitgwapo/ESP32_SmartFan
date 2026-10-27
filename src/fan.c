@@ -52,6 +52,25 @@ static const gpio_num_t output_pins[FAN_SPEED_COUNT] = {
     [FAN_HIGH]   = OUTPUT_HIGH,
 };
 
+/* Returns true once per confirmed button press. */
+static bool debounce_update(debounced_input_t *input)
+{
+    bool raw = gpio_get_level(input->pin);
+
+    if (raw == input->stable_state) {
+        input->counter = 0;          /* no change, reset */
+        return false;
+    }
+
+    if (++input->counter >= DEBOUNCE_STABLE_COUNT) {
+        input->stable_state = raw;   /* change confirmed */
+        input->counter = 0;
+        return raw == false;         /* pressed = pin went low */
+    }
+
+    return false;                    /* still waiting for it to settle */
+}
+
 void fan_init(void)
 {
     gpio_config_t input_cfg = {
