@@ -9,6 +9,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include <stdint.h>
+
 #define INPUT_OFF GPIO_NUM_18
 #define INPUT_LOW GPIO_NUM_19
 #define INPUT_NORMAL GPIO_NUM_21
@@ -29,6 +31,26 @@ typedef enum {
     FAN_HIGH,
     FAN_SPEED_COUNT
 } fan_speed_t;
+
+typedef struct {
+    gpio_num_t pin;
+    bool stable_state;    /* last confirmed level: true = released */
+    uint8_t counter;      /* how many samples in a row differ from it */
+} debounced_input_t;
+
+static debounced_input_t inputs[FAN_SPEED_COUNT] = {
+    [FAN_OFF]    = { INPUT_OFF,    true, 0 },
+    [FAN_LOW]    = { INPUT_LOW,    true, 0 },
+    [FAN_NORMAL] = { INPUT_NORMAL, true, 0 },
+    [FAN_HIGH]   = { INPUT_HIGH,   true, 0 },
+};
+
+static const gpio_num_t output_pins[FAN_SPEED_COUNT] = {
+    [FAN_OFF]    = OUTPUT_OFF,
+    [FAN_LOW]    = OUTPUT_LOW,
+    [FAN_NORMAL] = OUTPUT_NORMAL,
+    [FAN_HIGH]   = OUTPUT_HIGH,
+};
 
 void fan_init(void)
 {
