@@ -22,3 +22,10 @@
 #define AP_NAME                  "ESP32-Device"
 /* Use a unique password per device before deploying real devices. */
 #define AP_PASSWORD              "Admin123"
+
+#define EVENT_WIFI_CONNECTED     BIT0
+#define EVENT_WIFI_DISCONNECTED  BIT1
+#define EVENT_STA_CONFIGURED     BIT2
+
+#define WIFI_CONFIG_QUEUE_LENGTH 1
+#define WIFI_FORM_BUFFER_SIZE    384
