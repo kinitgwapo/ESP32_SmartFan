@@ -36,6 +36,19 @@ static EventGroupHandle_t wifi_event_group;
 static QueueHandle_t wifi_config_queue;
 static httpd_handle_t http_server;
 
+static void wifi_event_handler(void *arg,
+                               esp_event_base_t event_base,
+                               int32_t event_id,
+                               void *event_data);
+static void ip_event_handler(void *arg,
+                             esp_event_base_t event_base,
+                             int32_t event_id,
+                             void *event_data);
+static esp_err_t root_get_handler(httpd_req_t *req);
+static esp_err_t wifi_post_handler(httpd_req_t *req);
+static bool url_decode(char *text);
+static void apply_station_config(wifi_config_t *config);
+
 bool network_is_connected(void)
 {
     if (wifi_event_group == NULL) {
