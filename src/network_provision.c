@@ -349,4 +349,19 @@ void network_init(void)
         },
     };
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
+
+    
+    wifi_config_t saved_station_config = {0};
+    ESP_ERROR_CHECK(esp_wifi_get_config(WIFI_IF_STA, &saved_station_config));
+    if (saved_station_config.sta.ssid[0] != '\0') {
+        ESP_LOGI(TAG, "Saved Wi-Fi credentials found");
+        xEventGroupSetBits(wifi_event_group, EVENT_STA_CONFIGURED);
+    } else {
+        ESP_LOGI(TAG, "No saved Wi-Fi credentials; configure through the setup page");
+    }
+
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP, ip_event_handler, NULL));
 }
