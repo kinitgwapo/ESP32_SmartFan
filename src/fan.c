@@ -106,6 +106,8 @@ void fan_init(void)
 
     ESP_ERROR_CHECK(gpio_config(&input_cfg));
     ESP_ERROR_CHECK(gpio_config(&output_cfg));
+
+    fan_set_speed(FAN_OFF);
 }
 
 void fan_task(void *pvParameters)
