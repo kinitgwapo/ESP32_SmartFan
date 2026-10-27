@@ -121,6 +121,8 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 static esp_err_t wifi_post_handler(httpd_req_t *req)
 {
     char body[WIFI_FORM_BUFFER_SIZE] = {0};
+    char ssid[33] = {0};
+    bool got_ssid = false;
 
     if (req->content_len == 0 ||
         req->content_len >= sizeof(body)) {
@@ -156,6 +158,16 @@ static esp_err_t wifi_post_handler(httpd_req_t *req)
         if (!url_decode(field) || !url_decode(value)) {
             httpd_resp_set_status(req, "400 Bad Request");
             return httpd_resp_sendstr(req, "Invalid form encoding.");
+        }
+        
+        if (strcmp(field, "ssid") == 0) {
+            size_t len = strlen(value);
+            if (len == 0 || len > 32) {
+                httpd_resp_set_status(req, "400 Bad Request");
+                return httpd_resp_sendstr(req, "SSID must be 1 to 32 bytes.");
+            }
+            memcpy(ssid, value, len);
+            got_ssid = true;
         }
     }
     return ESP_OK; 
