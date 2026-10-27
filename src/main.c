@@ -41,4 +41,12 @@ void tasks_init() {
     }
 }
 
-void app_main() {}
+void app_main(void) {
+    fan_init();
+    tasks_init();
+
+    while (true) {
+        /* Replace this delay with your app-level work if needed. */
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
