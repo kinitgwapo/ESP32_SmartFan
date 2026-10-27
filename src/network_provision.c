@@ -198,5 +198,14 @@ static esp_err_t wifi_post_handler(httpd_req_t *req)
         httpd_resp_set_status(req, "503 Service Unavailable");
         return httpd_resp_sendstr(req, "Wi-Fi configuration is unavailable.");
     }
-    return ESP_OK; 
+    
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_sendstr(
+        req,
+        "<!doctype html><html><body style='font-family:sans-serif'>"
+        "<h2>Wi-Fi settings received</h2>"
+        "<p>The ESP32 will attempt to connect to this network. "
+        "The ESP32-Setup access point remains available.</p>"
+        "<a href='/'>Return to setup</a></body></html>"
+    );
 }
