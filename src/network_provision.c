@@ -262,3 +262,39 @@ static void ip_event_handler(void *arg,
     xEventGroupClearBits(wifi_event_group, EVENT_WIFI_DISCONNECTED);
     xEventGroupSetBits(wifi_event_group, EVENT_WIFI_CONNECTED);
 }
+
+static void apply_station_config(wifi_config_t *config)
+{
+    /* Disconnect the old station connection/attempt before changing config. */
+    xEventGroupClearBits(wifi_event_group,
+                         EVENT_WIFI_CONNECTED | EVENT_WIFI_DISCONNECTED);
+
+    esp_err_t err = esp_wifi_disconnect();
+    if (err == ESP_OK) {
+        /* Only this network task waits; local control tasks are unaffected. */
+        (void)xEventGroupWaitBits(
+            wifi_event_group,
+            EVENT_WIFI_DISCONNECTED,
+            pdTRUE,
+            pdTRUE,
+            pdMS_TO_TICKS(2000)
+        );
+    }
+
+    err = esp_wifi_set_config(WIFI_IF_STA, config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Could not save Wi-Fi configuration: %s",
+                 esp_err_to_name(err));
+        return;
+    }
+
+    xEventGroupSetBits(wifi_event_group, EVENT_STA_CONFIGURED);
+    ESP_LOGI(TAG, "Applying new Wi-Fi configuration for SSID: %.32s",
+             (const char *)config->sta.ssid);
+
+    err = esp_wifi_connect();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Connection request was not accepted: %s",
+                 esp_err_to_name(err));
+    }
+}
