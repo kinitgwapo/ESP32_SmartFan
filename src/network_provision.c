@@ -209,3 +209,56 @@ static esp_err_t wifi_post_handler(httpd_req_t *req)
         "<a href='/'>Return to setup</a></body></html>"
     );
 }
+static void wifi_event_handler(void *arg,
+                               esp_event_base_t event_base,
+                               int32_t event_id,
+                               void *event_data)
+{
+    switch (event_id) {
+    case WIFI_EVENT_STA_START:
+        if ((xEventGroupGetBits(wifi_event_group) &
+             EVENT_STA_CONFIGURED) != 0) {
+            esp_err_t err = esp_wifi_connect();
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Initial connect request failed: %s",
+                         esp_err_to_name(err));
+            }
+        }
+        break;
+
+    case WIFI_EVENT_STA_DISCONNECTED:
+        xEventGroupClearBits(wifi_event_group, EVENT_WIFI_CONNECTED);
+        xEventGroupSetBits(wifi_event_group, EVENT_WIFI_DISCONNECTED);
+        ESP_LOGW(TAG, "Router Wi-Fi disconnected; setup portal remains available");
+        /* No automatic retry loop: reconfigure from the setup page. */
+        break;
+
+    case WIFI_EVENT_AP_STACONNECTED:
+        ESP_LOGI(TAG, "A client connected to %s", AP_NAME);
+        break;
+
+    case WIFI_EVENT_AP_STADISCONNECTED:
+        ESP_LOGI(TAG, "A client disconnected from %s", AP_NAME);
+        break;
+
+    default:
+        break;
+    }
+}
+
+static void ip_event_handler(void *arg,
+                             esp_event_base_t event_base,
+                             int32_t event_id,
+                             void *event_data)
+{
+    if (event_id != IP_EVENT_STA_GOT_IP) {
+        return;
+    }
+
+    ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+    ESP_LOGI(TAG, "Router connection obtained IP: " IPSTR,
+             IP2STR(&event->ip_info.ip));
+
+    xEventGroupClearBits(wifi_event_group, EVENT_WIFI_DISCONNECTED);
+    xEventGroupSetBits(wifi_event_group, EVENT_WIFI_CONNECTED);
+}
