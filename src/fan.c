@@ -52,6 +52,6 @@ void fan_task(void *pvParameters)
     while(true) {
         if(network_is_connected()) {
 
-        }
+        } 
     }
 }
