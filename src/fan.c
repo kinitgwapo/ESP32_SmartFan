@@ -1,4 +1,5 @@
 #include "fan.h"
+#include "network_provision.h"
 
 #include <stdbool.h>
 
