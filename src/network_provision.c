@@ -364,4 +364,29 @@ void network_init(void)
         WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, ip_event_handler, NULL));
+
+    
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();
+    ESP_ERROR_CHECK(httpd_start(&http_server, &http_config));
+
+    httpd_uri_t root_uri = {
+        .uri = "/",
+        .method = HTTP_GET,
+        .handler = root_get_handler,
+        .user_ctx = NULL,
+    };
+    httpd_uri_t wifi_uri = {
+        .uri = "/wifi",
+        .method = HTTP_POST,
+        .handler = wifi_post_handler,
+        .user_ctx = NULL,
+    };
+
+    ESP_ERROR_CHECK(httpd_register_uri_handler(http_server, &root_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(http_server, &wifi_uri));
+
+    ESP_LOGI(TAG, "Setup AP is available as '%s'", AP_NAME);
+    ESP_LOGI(TAG, "Connect to %s and open http://192.168.4.1/", AP_NAME);
 }
