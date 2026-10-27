@@ -18,3 +18,7 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
+
+#define AP_NAME                  "ESP32-Device"
+/* Use a unique password per device before deploying real devices. */
+#define AP_PASSWORD              "Admin123"
