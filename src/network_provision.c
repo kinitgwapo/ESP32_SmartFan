@@ -141,5 +141,22 @@ static esp_err_t wifi_post_handler(httpd_req_t *req)
     }
     body[received] = '\0';
 
+    char *saveptr = NULL;
+    for (char *field = strtok_r(body, "&", &saveptr);
+         field != NULL;
+         field = strtok_r(NULL, "&", &saveptr)) {
+        char *equals = strchr(field, '=');
+        if (equals == NULL) {
+            continue;
+        }
+
+        *equals = '\0';
+        char *value = equals + 1;
+
+        if (!url_decode(field) || !url_decode(value)) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            return httpd_resp_sendstr(req, "Invalid form encoding.");
+        }
+    }
     return ESP_OK; 
 }
