@@ -41,7 +41,16 @@ void fan_init(void)
     .pull_down_en = GPIO_PULLDOWN_DISABLE,      /*!< GPIO pull-down                                       */
     .intr_type = GPIO_INTR_DISABLE              /*!< GPIO interrupt type                                  */
     };
-    
+
     ESP_ERROR_CHECK(gpio_config(&input_cfg));
     ESP_ERROR_CHECK(gpio_config(&output_cfg));
+}
+
+void fan_task(void *pvParameters)
+{
+    while(true) {
+        if(network_is_connected()) {
+
+        }
+    }
 }
