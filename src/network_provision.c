@@ -122,6 +122,7 @@ static esp_err_t wifi_post_handler(httpd_req_t *req)
 {
     char body[WIFI_FORM_BUFFER_SIZE] = {0};
     char ssid[33] = {0};
+    char password[64] = {0};
     bool got_ssid = false;
 
     if (req->content_len == 0 ||
@@ -168,6 +169,17 @@ static esp_err_t wifi_post_handler(httpd_req_t *req)
             }
             memcpy(ssid, value, len);
             got_ssid = true;
+        } else if (strcmp(field, "password") == 0) {
+            size_t len = strlen(value);
+            if (len > 63 || (len > 0 && len < 8)) {
+                httpd_resp_set_status(req, "400 Bad Request");
+                return httpd_resp_sendstr(
+                    req,
+                    "Password must be empty for an open network, "
+                    "or 8 to 63 characters for a password-protected network."
+                );
+            }
+            memcpy(password, value, len);
         }
     }
     return ESP_OK; 
