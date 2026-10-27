@@ -7,3 +7,8 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+#define INPUT_OFF GPIO_NUM_18
+#define INPUT_LOW GPIO_NUM_19
+#define INPUT_NORMAL GPIO_NUM_21
+#define INPUT_HIGH GPIO_NUM_22
