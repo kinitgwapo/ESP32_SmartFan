@@ -1,5 +1,6 @@
 #include "network_provision.h"
 #include "fan.h"
+#include "firebase.h"
 
 #include <stdbool.h>
 
@@ -44,6 +45,8 @@ void tasks_init() {
 void app_main(void) {
     fan_init();
     tasks_init();
+
+    ESP_ERROR_CHECK(firebase_start_auth_test());
 
     while (true) {
         /* Replace this delay with your app-level work if needed. */
