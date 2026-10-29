@@ -22,15 +22,7 @@
 #define OUTPUT_HIGH GPIO_NUM_27
 
 #define DEBOUNCE_SAMPLE_MS    10   /* how often the task samples the buttons */
-#define DEBOUNCE_STABLE_COUNT 3    /* samples in a row = 30 ms stable         */
-
-typedef enum {
-    FAN_OFF = 0,
-    FAN_LOW,
-    FAN_NORMAL,
-    FAN_HIGH,
-    FAN_SPEED_COUNT
-} fan_speed_t;
+#define DEBOUNCE_STABLE_COUNT 3    /* samples in a row = 30 ms stable        */
 
 typedef struct {
     gpio_num_t pin;
@@ -88,7 +80,7 @@ void fan_init(void)
                     BIT64(INPUT_NORMAL) |
                     BIT64(INPUT_HIGH),
     .mode = GPIO_MODE_INPUT,                    /*!< GPIO mode: set input/output mode                     */
-    .pull_up_en = GPIO_PULLUP_ENABLE,          /*!< GPIO pull-up                                         */
+    .pull_up_en = GPIO_PULLUP_ENABLE,           /*!< GPIO pull-up                                         */
     .pull_down_en = GPIO_PULLDOWN_DISABLE,      /*!< GPIO pull-down                                       */
     .intr_type = GPIO_INTR_DISABLE              /*!< GPIO interrupt type                                  */
     };
