@@ -3,6 +3,6 @@
 
 #include <esp_err.h>
 
-esp_err_t firebase_start_auth_test(void);
+esp_err_t firebase_start_auth_listener(void);
 
 #endif /* FIREBASE_H */

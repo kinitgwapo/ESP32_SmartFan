@@ -195,7 +195,7 @@ static esp_err_t firebase_sign_in(void)
 
 
 
-static void firebase_auth_test_task(void *pvParameters) {
+static void firebase_auth_listener_task(void *pvParameters) {
     ESP_LOGI(TAG, "Waiting for WiFi connection...");
     while(!network_is_connected()) {
         vTaskDelay(pdMS_TO_TICKS(500));
@@ -210,10 +210,10 @@ static void firebase_auth_test_task(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
-esp_err_t firebase_start_auth_test(void) {
+esp_err_t firebase_start_auth_listener(void) {
     BaseType_t result = xTaskCreate(
-        firebase_auth_test_task,
-        "firebase_auth",
+        firebase_auth_listener_task,
+        "firebase_sse",
         AUTH_TASK_STACK,
         NULL,
         4,

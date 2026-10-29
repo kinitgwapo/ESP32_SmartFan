@@ -46,7 +46,7 @@ void app_main(void) {
     fan_init();
     tasks_init();
 
-    ESP_ERROR_CHECK(firebase_start_auth_test());
+    ESP_ERROR_CHECK(firebase_start_auth_listener());
 
     while (true) {
         /* Replace this delay with your app-level work if needed. */
