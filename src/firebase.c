@@ -19,6 +19,10 @@
 #define AUTH_RESPONSE_SIZE 4096
 #define AUTH_TASK_STACK 8192
 #define TOKEN_SIZE 2048
+#define SSE_LINE_SIZE 768
+#define SSE_DATA_SIZE 2048
+
+#define HTTP_TIMEOUT_MS 60000
 
 static const char *TAG = "Firebase";
 
@@ -33,6 +37,15 @@ typedef struct {
     size_t length;
     bool overflow;
 } http_response_t;
+
+typedef struct {
+    char line[SSE_LINE_SIZE];
+    size_t line_length;
+    char event_name[64];
+    char data[SSE_DATA_SIZE];
+    size_t data_length;
+    bool force_reconnect;
+} sse_context_t;
 
 /* Collect the HTTP response body safely. */
 static esp_err_t auth_http_event_handler(
@@ -140,7 +153,74 @@ static esp_err_t firebase_sign_in(char *token_out, size_t token_capacity)
     return ESP_OK;
 }
 
+static esp_err_t sse_http_event_handler(esp_http_client_event_t *event)
+{
+    sse_context_t *ctx = (sse_context_t *)event->user_data;
+    if (ctx == NULL) return ESP_OK;
 
+    if (event->event_id == HTTP_EVENT_ON_DATA && event->data != NULL && event->data_len > 0) {
+        const char *bytes = (const char *)event->data;
+        for (int i = 0; i < event->data_len; ++i) {
+            char ch = bytes[i];
+            if (ch == '\r') continue;
+            if (ch == '\n') {
+                process_sse_line(ctx);
+                if (ctx->force_reconnect) return ESP_FAIL;
+            } else if (ctx->line_length + 1 < sizeof(ctx->line)) {
+                ctx->line[ctx->line_length++] = ch;
+            } else {
+                ESP_LOGW(TAG, "Firebase SSE line too long; dropping line");
+                ctx->line_length = 0;
+            }
+        }
+    }
+    return ESP_OK;
+}
+
+/* Phase B: open an authenticated RTDB SSE stream and log incoming fan commands. */
+static esp_err_t firebase_listen_once(const char *token)
+{
+    char base[384];
+    strlcpy(base, FIREBASE_DATABASE_URL, sizeof(base));
+    size_t base_len = strlen(base);
+    while (base_len > 0 && base[base_len - 1] == '/') base[--base_len] = '\0';
+
+    char url[3000];
+    int n = snprintf(url, sizeof(url), "%s/fan/command.json?auth=%s", base, token);
+    if (n < 0 || (size_t)n >= sizeof(url)) return ESP_ERR_INVALID_SIZE;
+
+    sse_context_t ctx = {0};
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_GET,
+        .event_handler = sse_http_event_handler,
+        .user_data = &ctx,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = HTTP_TIMEOUT_MS,
+        .buffer_size = 2048,
+        .buffer_size_tx = 1024,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) return ESP_FAIL;
+
+    esp_err_t err = esp_http_client_set_header(client, "Accept", "text/event-stream");
+    if (err == ESP_OK) err = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+
+    if (ctx.force_reconnect) return ESP_ERR_INVALID_STATE;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "SSE connection ended: %s", esp_err_to_name(err));
+        return err;
+    }
+    if (status != 200) {
+        ESP_LOGE(TAG, "Firebase SSE returned HTTP %d (check database URL, token, and rules)", status);
+        return ESP_FAIL;
+    }
+    /* An SSE stream is expected to remain open; if it ends normally, reconnect. */
+    ESP_LOGW(TAG, "Firebase SSE stream ended; reconnecting");
+    return ESP_FAIL;
+}
 
 
 
@@ -155,6 +235,10 @@ static void firebase_auth_listener_task(void *pvParameters) {
 
         char token[TOKEN_SIZE] = {0};
         esp_err_t err = firebase_sign_in(token, sizeof(token));
+        if(err == ESP_OK) {
+            ESP_LOGI(TAG, "Listening for updates at /fan/command");
+            err = firebase_listen_once(token);
+        }
     }
     
 
