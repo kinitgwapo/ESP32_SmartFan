@@ -89,7 +89,10 @@ static esp_err_t auth_http_event_handler(esp_http_client_event_t *event)
     return ESP_OK;
 }
 
-/* Sign in and verify that Firebase returned an ID token. */
+
+
+
+
 static esp_err_t firebase_sign_in(char *token_out, size_t token_capacity)
 {
     char url[384];
@@ -164,6 +167,10 @@ static esp_err_t firebase_sign_in(char *token_out, size_t token_capacity)
     return ESP_OK;
 }
 
+
+
+
+
 static void log_speed_if_present(const cJSON *data)
 {
     if (!cJSON_IsObject(data)) return;
@@ -176,6 +183,10 @@ static void log_speed_if_present(const cJSON *data)
         ESP_LOGI(TAG, "Command ID=%lld", (long long)command_id->valuedouble);
     }
 }
+
+
+
+
 
 static void process_sse_message(sse_context_t *ctx)
 {
@@ -228,6 +239,10 @@ static void process_sse_message(sse_context_t *ctx)
     ctx->data[0] = '\0';
 }
 
+
+
+
+
 static void process_sse_line(sse_context_t *ctx)
 {
     ctx->line[ctx->line_length] = '\0';
@@ -257,6 +272,10 @@ static void process_sse_line(sse_context_t *ctx)
     ctx->line_length = 0;
 }
 
+
+
+
+
 static esp_err_t sse_http_event_handler(esp_http_client_event_t *event)
 {
     sse_context_t *ctx = (sse_context_t *)event->user_data;
@@ -281,7 +300,10 @@ static esp_err_t sse_http_event_handler(esp_http_client_event_t *event)
     return ESP_OK;
 }
 
-/* Phase B: open an authenticated RTDB SSE stream and log incoming fan commands. */
+
+
+
+
 static esp_err_t firebase_listen_once(const char *token)
 {
     char base[384];
@@ -353,6 +375,10 @@ static void firebase_auth_listener_task(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
+
+
+
+
 
 esp_err_t firebase_start_auth_listener(void) {
     BaseType_t result = xTaskCreate(
