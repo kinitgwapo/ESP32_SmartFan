@@ -1,6 +1,9 @@
 #ifndef FAN_H
 #define FAN_H
 
+#include "stdint.h"
+#include "esp_err.h"
+
 typedef enum {
     FAN_OFF = 0,
     FAN_LOW,
