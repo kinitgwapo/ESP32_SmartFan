@@ -32,6 +32,9 @@ static const char *TAG = "Firebase";
 
 
 
+
+
+
 typedef struct {
     char body[AUTH_RESPONSE_SIZE];
     size_t length;
@@ -46,6 +49,15 @@ typedef struct {
     size_t data_length;
     bool force_reconnect;
 } sse_context_t;
+
+
+
+
+
+
+
+
+
 
 /* Collect the HTTP response body safely. */
 static esp_err_t auth_http_event_handler(
