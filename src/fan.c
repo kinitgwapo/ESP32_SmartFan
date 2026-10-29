@@ -135,6 +135,17 @@ void fan_task(void *pvParameters)
         fan_command_t command;
 
         if(xQueueReceive(fan_command_queue, &command, 0) == pdPASS) {
+            if(command.speed >= FAN_OFF && command.speed < FAN_SPEED_COUNT) {
+                ESP_LOGI(TAG, "Applying remote command: id=%ld, speed=%d",
+                              (long)command.command_id,
+                              (int)command.speed
+                );
+
+                fan_set_speed(command.speed);
+            }
+
+
+
             static const char *speed_names[] = { "off", "low", "normal", "high" };
 
             ESP_LOGI(TAG, "Received firebase command: id=%ld, speed=%s "
