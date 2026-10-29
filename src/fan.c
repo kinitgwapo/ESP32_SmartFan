@@ -142,17 +142,9 @@ void fan_task(void *pvParameters)
                 );
 
                 fan_set_speed(command.speed);
+            } else {
+                ESP_LOGW(TAG, "Ignoring invalid queued fan command");
             }
-
-
-
-            static const char *speed_names[] = { "off", "low", "normal", "high" };
-
-            ESP_LOGI(TAG, "Received firebase command: id=%ld, speed=%s "
-                          "(Logging only; GPIO unchanged)",
-                          (long)command.command_id,
-                          speed_names[command.speed]
-            );
         }
 
         for (int i = 0; i < FAN_SPEED_COUNT; i++) {
