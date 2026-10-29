@@ -164,6 +164,99 @@ static esp_err_t firebase_sign_in(char *token_out, size_t token_capacity)
     return ESP_OK;
 }
 
+static void log_speed_if_present(const cJSON *data)
+{
+    if (!cJSON_IsObject(data)) return;
+    const cJSON *speed = cJSON_GetObjectItemCaseSensitive(data, "speed");
+    if (cJSON_IsString(speed) && speed->valuestring != NULL) {
+        ESP_LOGI(TAG, "SSE command received: speed=%s", speed->valuestring);
+    }
+    const cJSON *command_id = cJSON_GetObjectItemCaseSensitive(data, "commandId");
+    if (cJSON_IsNumber(command_id)) {
+        ESP_LOGI(TAG, "Command ID=%lld", (long long)command_id->valuedouble);
+    }
+}
+
+static void process_sse_message(sse_context_t *ctx)
+{
+    if (ctx->event_name[0] == '\0') {
+        ctx->data_length = 0;
+        ctx->data[0] = '\0';
+        return;
+    }
+
+    if (strcmp(ctx->event_name, "keep-alive") == 0) {
+        ctx->data_length = 0;
+        ctx->data[0] = '\0';
+        ctx->event_name[0] = '\0';
+        return;
+    }
+    if (strcmp(ctx->event_name, "cancel") == 0 ||
+        strcmp(ctx->event_name, "auth_revoked") == 0) {
+        ESP_LOGW(TAG, "Firebase SSE event '%s'; reconnecting and signing in again", ctx->event_name);
+        ctx->force_reconnect = true;
+        return;
+    }
+
+    if (strcmp(ctx->event_name, "put") == 0 || strcmp(ctx->event_name, "patch") == 0) {
+        cJSON *root = cJSON_Parse(ctx->data);
+        if (root != NULL) {
+            const cJSON *path = cJSON_GetObjectItemCaseSensitive(root, "path");
+            const cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
+            if (cJSON_IsString(path) && data != NULL) {
+                /* Listening at /fan/command.json: root snapshots and child updates. */
+                if (strcmp(path->valuestring, "/") == 0) {
+                    log_speed_if_present(data);
+                } else if (strcmp(path->valuestring, "/speed") == 0 && cJSON_IsString(data)) {
+                    ESP_LOGI(TAG, "SSE command received: speed=%s", data->valuestring);
+                } else if (strcmp(path->valuestring, "/commandId") == 0 && cJSON_IsNumber(data)) {
+                    ESP_LOGI(TAG, "SSE command ID updated: %lld", (long long)data->valuedouble);
+                } else {
+                    ESP_LOGD(TAG, "SSE update path=%s", path->valuestring);
+                }
+            }
+            cJSON_Delete(root);
+        } else {
+            ESP_LOGW(TAG, "Could not parse Firebase SSE data payload");
+        }
+    } else {
+        ESP_LOGD(TAG, "Ignoring Firebase SSE event '%s'", ctx->event_name);
+    }
+
+    ctx->event_name[0] = '\0';
+    ctx->data_length = 0;
+    ctx->data[0] = '\0';
+}
+
+static void process_sse_line(sse_context_t *ctx)
+{
+    ctx->line[ctx->line_length] = '\0';
+    if (ctx->line_length == 0) {
+        process_sse_message(ctx);
+    } else if (ctx->line[0] == ':') {
+        /* SSE comment/heartbeat. */
+    } else if (strncmp(ctx->line, "event:", 6) == 0) {
+        const char *value = ctx->line + 6;
+        while (*value == ' ') value++;
+        strlcpy(ctx->event_name, value, sizeof(ctx->event_name));
+    } else if (strncmp(ctx->line, "data:", 5) == 0) {
+        const char *value = ctx->line + 5;
+        if (*value == ' ') value++;
+        size_t len = strlen(value);
+        if (ctx->data_length + len + 2 < sizeof(ctx->data)) {
+            if (ctx->data_length > 0) ctx->data[ctx->data_length++] = '\n';
+            memcpy(ctx->data + ctx->data_length, value, len);
+            ctx->data_length += len;
+            ctx->data[ctx->data_length] = '\0';
+        } else {
+            ESP_LOGW(TAG, "Firebase SSE event exceeded buffer; dropping event");
+            ctx->data_length = 0;
+            ctx->data[0] = '\0';
+        }
+    }
+    ctx->line_length = 0;
+}
+
 static esp_err_t sse_http_event_handler(esp_http_client_event_t *event)
 {
     sse_context_t *ctx = (sse_context_t *)event->user_data;
