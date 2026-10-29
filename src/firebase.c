@@ -11,13 +11,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#define FIREBASE_DATABASE_URL "DATABASE_URL"
+#define FIREBASE_DATABASE_URL "FIREBASE_DATABASE_URL"
 #define FIREBASE_API_KEY "FIREBASE_WEB_API_KEY"
 #define FIREBASE_AUTH_EMAIL "AUTH_EMAIL"
 #define FIREBASE_AUTH_PASSWORD "AUTH_PASS"
 
 #define AUTH_RESPONSE_SIZE 4096
-#define AUTH_TASK_STACK 8192
+#define AUTH_TASK_STACK (12 * 1024) // Not Finalized for it is not validated rigorously
 #define TOKEN_SIZE 2048
 #define SSE_LINE_SIZE 768
 #define SSE_DATA_SIZE 2048
