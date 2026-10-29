@@ -14,7 +14,7 @@ typedef enum {
 
 typedef struct {
     fan_speed_t speed;
-    int32_t command_id;
+    int64_t command_id;
 } fan_command_t;
 
 /* Configure & Initialize fan control pins */

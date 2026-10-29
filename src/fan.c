@@ -136,8 +136,8 @@ void fan_task(void *pvParameters)
 
         if(xQueueReceive(fan_command_queue, &command, 0) == pdPASS) {
             if(command.speed >= FAN_OFF && command.speed < FAN_SPEED_COUNT) {
-                ESP_LOGI(TAG, "Applying remote command: id=%ld, speed=%d",
-                              (long)command.command_id,
+                ESP_LOGI(TAG, "Applying remote command: id=%lld, speed=%d",
+                              (long long)command.command_id,
                               (int)command.speed
                 );
 
