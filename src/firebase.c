@@ -14,8 +14,8 @@
 
 #include "limits.h"
 
-#define FIREBASE_DATABASE_URL "FIREBASE_DATABASE_URL"
-#define FIREBASE_API_KEY "FIREBASE_WEB_API_KEY"
+#define FIREBASE_DATABASE_URL "DATABASE_URL"
+#define FIREBASE_API_KEY "WEB_API_KEY"
 #define FIREBASE_AUTH_EMAIL "AUTH_EMAIL"
 #define FIREBASE_AUTH_PASSWORD "AUTH_PASS"
 
@@ -30,7 +30,7 @@
 static const char *TAG = "Firebase";
 
 static bool have_last_submitted_command_id = false;
-static int32_t last_submitted_command_id = 0;
+static int64_t last_submitted_command_id = 0;
 
 
 
@@ -198,7 +198,7 @@ static bool parse_fan_speed(const cJSON *value, fan_speed_t *out)
     return true;
 }
 
-static bool parse_command_id(const cJSON *value, int32_t *out)
+static bool parse_command_id(const cJSON *value, int64_t *out)
 {
     if (!cJSON_IsNumber(value) || out == NULL) {
         return false;
@@ -206,13 +206,15 @@ static bool parse_command_id(const cJSON *value, int32_t *out)
 
     double number = value->valuedouble;
 
-    if (number < INT32_MIN || number > INT32_MAX ||
-        number != (double)(int32_t)number) {
+    /* Keep within the exact-integer range of a JSON double. */
+    if (number < -9007199254740991.0 ||
+        number >  9007199254740991.0 ||
+        number != (double)(int64_t)number) {
         ESP_LOGW(TAG, "Ignoring invalid command ID");
         return false;
     }
 
-    *out = (int32_t)number;
+    *out = (int64_t)number;
     return true;
 }
 
@@ -238,8 +240,8 @@ static void submit_complete_command(const cJSON *data)
 
     if (have_last_submitted_command_id &&
         command.command_id == last_submitted_command_id) {
-        ESP_LOGD(TAG, "Duplicate command ID %ld ignored",
-                 (long)command.command_id);
+        ESP_LOGD(TAG, "Duplicate command ID %lld ignored",
+                 (long long)command.command_id);
         return;
     }
 
@@ -249,8 +251,8 @@ static void submit_complete_command(const cJSON *data)
         last_submitted_command_id = command.command_id;
         have_last_submitted_command_id = true;
 
-        ESP_LOGI(TAG, "Queued command ID=%ld, speed=%d",
-                 (long)command.command_id, (int)command.speed);
+        ESP_LOGI(TAG, "Queued command ID=%lld, speed=%d",
+                 (long long)command.command_id, (int)command.speed);
     } else {
         ESP_LOGW(TAG, "Could not queue command: %s",
                  esp_err_to_name(err));
@@ -304,7 +306,13 @@ static void process_sse_message(sse_context_t *ctx)
     }
 
     if (strcmp(path->valuestring, "/") == 0) {
-        ESP_LOGI(TAG, "Received complete command object");
+        char *debug_json = cJSON_PrintUnformatted(data);
+
+        ESP_LOGI(TAG, "Complete command JSON: %s",
+             debug_json != NULL ? debug_json : "(serialization failed)");
+
+        cJSON_free(debug_json);
+
         submit_complete_command(data);
     } else {
         ESP_LOGD(TAG, "Ignoring child update path=%s",
@@ -404,7 +412,7 @@ static esp_err_t firebase_listen_once(const char *token)
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = HTTP_TIMEOUT_MS,
         .buffer_size = 2048,
-        .buffer_size_tx = 1024,
+        .buffer_size_tx = 2048,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == NULL) return ESP_FAIL;
