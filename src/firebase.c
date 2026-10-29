@@ -60,8 +60,7 @@ typedef struct {
 
 
 /* Collect the HTTP response body safely. */
-static esp_err_t auth_http_event_handler(
-    esp_http_client_event_t *event)
+static esp_err_t auth_http_event_handler(esp_http_client_event_t *event)
 {
     http_response_t *response =
         (http_response_t *)event->user_data;
@@ -251,17 +250,15 @@ static void firebase_auth_listener_task(void *pvParameters) {
             ESP_LOGI(TAG, "Listening for updates at /fan/command");
             err = firebase_listen_once(token);
         }
+        memset(token, 0, sizeof(token));
+
+        if(!network_is_connected()) {
+            ESP_LOGW(TAG, "Wi-Fi disconnected; waiting for network to return");
+        } else {
+            ESP_LOGW(TAG, "Firebase listener will retry in 5 seconds");
+        }
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
-    
-
-
-    ESP_LOGI(TAG, "WiFi connected. Testing Firebase Authentication");
-    esp_err_t err = firebase_sign_in();
-    if(err != ESP_OK) {
-        ESP_LOGE(TAG, "Firebase Authentication test failed");
-    }
-
-    vTaskDelete(NULL);
 }
 
 esp_err_t firebase_start_auth_listener(void) {
