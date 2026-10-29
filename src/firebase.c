@@ -1,5 +1,6 @@
 #include "firebase.h"
 #include "network_provision.h"
+#include "fan.h"
 
 #include "esp_log.h"
 
@@ -10,6 +11,8 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+#include "limits.h"
 
 #define FIREBASE_DATABASE_URL "FIREBASE_DATABASE_URL"
 #define FIREBASE_API_KEY "FIREBASE_WEB_API_KEY"
@@ -26,7 +29,8 @@
 
 static const char *TAG = "Firebase";
 
-
+static bool have_last_submitted_command_id = false;
+static int32_t last_submitted_command_id = 0;
 
 
 
@@ -171,16 +175,85 @@ static esp_err_t firebase_sign_in(char *token_out, size_t token_capacity)
 
 
 
-static void log_speed_if_present(const cJSON *data)
+static bool parse_fan_speed(const cJSON *value, fan_speed_t *out)
 {
-    if (!cJSON_IsObject(data)) return;
-    const cJSON *speed = cJSON_GetObjectItemCaseSensitive(data, "speed");
-    if (cJSON_IsString(speed) && speed->valuestring != NULL) {
-        ESP_LOGI(TAG, "SSE command received: speed=%s", speed->valuestring);
+    if (!cJSON_IsString(value) ||
+        value->valuestring == NULL || out == NULL) {
+        return false;
     }
-    const cJSON *command_id = cJSON_GetObjectItemCaseSensitive(data, "commandId");
-    if (cJSON_IsNumber(command_id)) {
-        ESP_LOGI(TAG, "Command ID=%lld", (long long)command_id->valuedouble);
+
+    if (strcmp(value->valuestring, "off") == 0) {
+        *out = FAN_OFF;
+    } else if (strcmp(value->valuestring, "low") == 0) {
+        *out = FAN_LOW;
+    } else if (strcmp(value->valuestring, "normal") == 0) {
+        *out = FAN_NORMAL;
+    } else if (strcmp(value->valuestring, "high") == 0) {
+        *out = FAN_HIGH;
+    } else {
+        ESP_LOGW(TAG, "Ignoring unknown fan speed");
+        return false;
+    }
+
+    return true;
+}
+
+static bool parse_command_id(const cJSON *value, int32_t *out)
+{
+    if (!cJSON_IsNumber(value) || out == NULL) {
+        return false;
+    }
+
+    double number = value->valuedouble;
+
+    if (number < INT32_MIN || number > INT32_MAX ||
+        number != (double)(int32_t)number) {
+        ESP_LOGW(TAG, "Ignoring invalid command ID");
+        return false;
+    }
+
+    *out = (int32_t)number;
+    return true;
+}
+
+static void submit_complete_command(const cJSON *data)
+{
+    if (!cJSON_IsObject(data)) {
+        ESP_LOGW(TAG, "Expected a complete command object");
+        return;
+    }
+
+    const cJSON *speed_json =
+        cJSON_GetObjectItemCaseSensitive(data, "speed");
+    const cJSON *id_json =
+        cJSON_GetObjectItemCaseSensitive(data, "commandId");
+
+    fan_command_t command;
+
+    if (!parse_fan_speed(speed_json, &command.speed) ||
+        !parse_command_id(id_json, &command.command_id)) {
+        ESP_LOGW(TAG, "Ignoring incomplete command");
+        return;
+    }
+
+    if (have_last_submitted_command_id &&
+        command.command_id == last_submitted_command_id) {
+        ESP_LOGD(TAG, "Duplicate command ID %ld ignored",
+                 (long)command.command_id);
+        return;
+    }
+
+    esp_err_t err = fan_command_submit(&command);
+
+    if (err == ESP_OK) {
+        last_submitted_command_id = command.command_id;
+        have_last_submitted_command_id = true;
+
+        ESP_LOGI(TAG, "Queued command ID=%ld, speed=%d",
+                 (long)command.command_id, (int)command.speed);
+    } else {
+        ESP_LOGW(TAG, "Could not queue command: %s",
+                 esp_err_to_name(err));
     }
 }
 
@@ -191,49 +264,56 @@ static void log_speed_if_present(const cJSON *data)
 static void process_sse_message(sse_context_t *ctx)
 {
     if (ctx->event_name[0] == '\0') {
-        ctx->data_length = 0;
-        ctx->data[0] = '\0';
-        return;
+        goto cleanup;
     }
 
     if (strcmp(ctx->event_name, "keep-alive") == 0) {
-        ctx->data_length = 0;
-        ctx->data[0] = '\0';
-        ctx->event_name[0] = '\0';
-        return;
+        goto cleanup;
     }
+
     if (strcmp(ctx->event_name, "cancel") == 0 ||
         strcmp(ctx->event_name, "auth_revoked") == 0) {
-        ESP_LOGW(TAG, "Firebase SSE event '%s'; reconnecting and signing in again", ctx->event_name);
+        ESP_LOGW(TAG, "Firebase SSE event '%s'; reconnecting",
+                 ctx->event_name);
         ctx->force_reconnect = true;
         return;
     }
 
-    if (strcmp(ctx->event_name, "put") == 0 || strcmp(ctx->event_name, "patch") == 0) {
-        cJSON *root = cJSON_Parse(ctx->data);
-        if (root != NULL) {
-            const cJSON *path = cJSON_GetObjectItemCaseSensitive(root, "path");
-            const cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
-            if (cJSON_IsString(path) && data != NULL) {
-                /* Listening at /fan/command.json: root snapshots and child updates. */
-                if (strcmp(path->valuestring, "/") == 0) {
-                    log_speed_if_present(data);
-                } else if (strcmp(path->valuestring, "/speed") == 0 && cJSON_IsString(data)) {
-                    ESP_LOGI(TAG, "SSE command received: speed=%s", data->valuestring);
-                } else if (strcmp(path->valuestring, "/commandId") == 0 && cJSON_IsNumber(data)) {
-                    ESP_LOGI(TAG, "SSE command ID updated: %lld", (long long)data->valuedouble);
-                } else {
-                    ESP_LOGD(TAG, "SSE update path=%s", path->valuestring);
-                }
-            }
-            cJSON_Delete(root);
-        } else {
-            ESP_LOGW(TAG, "Could not parse Firebase SSE data payload");
-        }
-    } else {
-        ESP_LOGD(TAG, "Ignoring Firebase SSE event '%s'", ctx->event_name);
+    if (strcmp(ctx->event_name, "put") != 0 &&
+        strcmp(ctx->event_name, "patch") != 0) {
+        ESP_LOGD(TAG, "Ignoring SSE event '%s'", ctx->event_name);
+        goto cleanup;
     }
 
+    cJSON *root = cJSON_Parse(ctx->data);
+
+    if (root == NULL) {
+        ESP_LOGW(TAG, "Could not parse Firebase SSE payload");
+        goto cleanup;
+    }
+
+    const cJSON *path =
+        cJSON_GetObjectItemCaseSensitive(root, "path");
+    const cJSON *data =
+        cJSON_GetObjectItemCaseSensitive(root, "data");
+
+    if (!cJSON_IsString(path) || data == NULL) {
+        ESP_LOGW(TAG, "SSE payload missing path or data");
+        cJSON_Delete(root);
+        goto cleanup;
+    }
+
+    if (strcmp(path->valuestring, "/") == 0) {
+        ESP_LOGI(TAG, "Received complete command object");
+        submit_complete_command(data);
+    } else {
+        ESP_LOGD(TAG, "Ignoring child update path=%s",
+                 path->valuestring);
+    }
+
+    cJSON_Delete(root);
+
+cleanup:
     ctx->event_name[0] = '\0';
     ctx->data_length = 0;
     ctx->data[0] = '\0';
