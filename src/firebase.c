@@ -11,6 +11,8 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 #include "limits.h"
 
@@ -27,8 +29,17 @@
 
 #define HTTP_TIMEOUT_MS 60000
 
+#define STATE_UPLOAD_TASK_STACK (12 * 1024)
+#define STATE_UPLOAD_RETRY_MS 4000
+#define STATE_QUEUE_LENGTH 1
+
 static const char *TAG = "Firebase";
 
+static QueueHandle_t state_queue;
+static SemaphoreHandle_t auth_mutex;
+static char shared_id_token[TOKEN_SIZE];
+static bool auth_session_ready;
+static TaskHandle_t state_uploader_handle;
 static bool have_last_submitted_command_id = false;
 static int64_t last_submitted_command_id = 0;
 
@@ -38,6 +49,14 @@ static int64_t last_submitted_command_id = 0;
 
 
 
+
+
+
+typedef struct {
+    char body[256];
+    size_t length;
+    bool overflow;
+} state_http_response_t;
 
 typedef struct {
     char body[AUTH_RESPONSE_SIZE];
@@ -53,6 +72,184 @@ typedef struct {
     size_t data_length;
     bool force_reconnect;
 } sse_context_t;
+
+
+
+
+
+
+
+
+
+
+static const char *fan_speed_name(fan_speed_t speed)
+{
+    switch(speed) {
+    case FAN_OFF: return "off";
+    case FAN_LOW: return "low";
+    case FAN_NORMAL: return "normal";
+    case FAN_HIGH: return "high";
+    default: return NULL;
+    }
+}
+
+/* fan_task only queues changes; it never performs network I/O. */
+void firebase_state_changed(fan_speed_t speed)
+{
+    if (speed < FAN_OFF || speed >= FAN_SPEED_COUNT || state_queue == NULL) {
+        return;
+    }
+
+    /* One-slot overwrite intentionally coalesces offline transitions. */
+    (void)xQueueOverwrite(state_queue, &speed);
+}
+
+static esp_err_t state_http_event_handler(esp_http_client_event_t *event)
+{
+    state_http_response_t *response = event->user_data;
+    if (response == NULL) return ESP_OK;
+
+    if (event->event_id == HTTP_EVENT_ON_DATA &&
+        event->data != NULL && event->data_len > 0) {
+        size_t available = sizeof(response->body) - 1 - response->length;
+        size_t incoming = (size_t)event->data_len;
+        if (incoming > available) {
+            response->overflow = true;
+            return ESP_FAIL;
+        }
+        memcpy(response->body + response->length, event->data, incoming);
+        response->length += incoming;
+        response->body[response->length] = '\0';
+    }
+    return ESP_OK;
+}
+
+static bool copy_valid_token(char *destination, size_t capacity)
+{
+    bool ready = false;
+    if (auth_mutex == NULL) return false;
+
+    xSemaphoreTake(auth_mutex, portMAX_DELAY);
+    if (auth_session_ready && shared_id_token[0] != '\0' &&
+        strlen(shared_id_token) < capacity) {
+        strlcpy(destination, shared_id_token, capacity);
+        ready = true;
+    }
+    xSemaphoreGive(auth_mutex);
+    return ready;
+}
+
+static void auth_session_set(const char *token)
+{
+    if (auth_mutex == NULL) return;
+    xSemaphoreTake(auth_mutex, portMAX_DELAY);
+    if (token != NULL && token[0] != '\0') {
+        strlcpy(shared_id_token, token, sizeof(shared_id_token));
+        auth_session_ready = true;
+    } else {
+        memset(shared_id_token, 0, sizeof(shared_id_token));
+        auth_session_ready = false;
+    }
+    xSemaphoreGive(auth_mutex);
+}
+
+static esp_err_t firebase_write_fan_state(fan_speed_t speed, const char *token)
+{
+    const char *name = fan_speed_name(speed);
+    if (name == NULL || token == NULL || token[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char base[384];
+    strlcpy(base, FIREBASE_DATABASE_URL, sizeof(base));
+    size_t base_len = strlen(base);
+    while (base_len > 0 && base[base_len - 1] == '/') {
+        base[--base_len] = '\0';
+    }
+
+    char url[3000];
+    int n = snprintf(url, sizeof(url), "%s/fan/state.json?auth=%s", base, token);
+    if (n < 0 || (size_t)n >= sizeof(url)) return ESP_ERR_INVALID_SIZE;
+
+    char body[64];
+    n = snprintf(body, sizeof(body), "{\"speed\":\"%s\"}", name);
+    if (n < 0 || (size_t)n >= sizeof(body)) return ESP_ERR_INVALID_SIZE;
+
+    state_http_response_t response = {0};
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_PUT,
+        .event_handler = state_http_event_handler,
+        .user_data = &response,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = 12000,
+        .buffer_size = 2048,
+        .buffer_size_tx = 2048,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) return ESP_FAIL;
+
+    esp_err_t err = esp_http_client_set_header(client, "Content-Type", "application/json");
+    if (err == ESP_OK) {
+        err = esp_http_client_set_post_field(client, body, (int)strlen(body));
+    }
+    if (err == ESP_OK) err = esp_http_client_perform(client);
+
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Fan-state HTTP write failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    if (response.overflow) return ESP_ERR_INVALID_SIZE;
+    if (status < 200 || status >= 300) {
+        ESP_LOGW(TAG, "Fan-state write returned HTTP %d", status);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Reported applied fan speed '%s' to /fan/state", name);
+    return ESP_OK;
+}
+
+static void firebase_state_uploader_task(void *pvParameters)
+{
+    (void)pvParameters;
+    fan_speed_t pending_speed = FAN_OFF;
+    bool have_pending = false;
+
+    while (true) {
+        /* Wait briefly for new state. Keep pending value across outages. */
+        fan_speed_t queued_speed;
+        if (xQueueReceive(state_queue, &queued_speed,
+                          pdMS_TO_TICKS(1000)) == pdPASS) {
+            pending_speed = queued_speed;
+            have_pending = true;
+        }
+        if (!have_pending) continue;
+
+        /* Collapse any further queued transitions to the newest state. */
+        while (xQueueReceive(state_queue, &queued_speed, 0) == pdPASS) {
+            pending_speed = queued_speed;
+        }
+
+        if (!network_is_connected()) continue;
+
+        char token[TOKEN_SIZE] = {0};
+        if (!copy_valid_token(token, sizeof(token))) continue;
+
+        esp_err_t err = firebase_write_fan_state(pending_speed, token);
+        memset(token, 0, sizeof(token));
+
+        if (err == ESP_OK) {
+            have_pending = false;
+        } else {
+            /* Retain pending state; next loop retries when online/auth'd. */
+            vTaskDelay(pdMS_TO_TICKS(STATE_UPLOAD_RETRY_MS));
+        }
+    }
+}
 
 
 
@@ -92,10 +289,6 @@ static esp_err_t auth_http_event_handler(esp_http_client_event_t *event)
 
     return ESP_OK;
 }
-
-
-
-
 
 static esp_err_t firebase_sign_in(char *token_out, size_t token_capacity)
 {
@@ -170,10 +363,6 @@ static esp_err_t firebase_sign_in(char *token_out, size_t token_capacity)
     ESP_LOGI(TAG, "Firebase Authentication succeeded; ID token retained in RAM");
     return ESP_OK;
 }
-
-
-
-
 
 static bool parse_fan_speed(const cJSON *value, fan_speed_t *out)
 {
@@ -259,10 +448,6 @@ static void submit_complete_command(const cJSON *data)
     }
 }
 
-
-
-
-
 static void process_sse_message(sse_context_t *ctx)
 {
     if (ctx->event_name[0] == '\0') {
@@ -327,10 +512,6 @@ cleanup:
     ctx->data[0] = '\0';
 }
 
-
-
-
-
 static void process_sse_line(sse_context_t *ctx)
 {
     ctx->line[ctx->line_length] = '\0';
@@ -360,10 +541,6 @@ static void process_sse_line(sse_context_t *ctx)
     ctx->line_length = 0;
 }
 
-
-
-
-
 static esp_err_t sse_http_event_handler(esp_http_client_event_t *event)
 {
     sse_context_t *ctx = (sse_context_t *)event->user_data;
@@ -387,10 +564,6 @@ static esp_err_t sse_http_event_handler(esp_http_client_event_t *event)
     }
     return ESP_OK;
 }
-
-
-
-
 
 static esp_err_t firebase_listen_once(const char *token)
 {
@@ -440,6 +613,11 @@ static esp_err_t firebase_listen_once(const char *token)
 
 
 
+
+
+
+
+
 static void firebase_auth_listener_task(void *pvParameters) {
     while(true) {
         while(!network_is_connected()) {
@@ -450,9 +628,17 @@ static void firebase_auth_listener_task(void *pvParameters) {
         char token[TOKEN_SIZE] = {0};
         esp_err_t err = firebase_sign_in(token, sizeof(token));
         if(err == ESP_OK) {
+            /* Publish a fresh auth sesion, then request one full state sync */
+            auth_session_set(token);
+            fan_speed_t actual_speed = fan_get_speed();
+            if(state_queue != NULL) {
+                (void)xQueueOverwrite(state_queue, &actual_speed);
+            }
             ESP_LOGI(TAG, "Listening for updates at /fan/command");
             err = firebase_listen_once(token);
         }
+        /* Treat each listener session ending as auth/session loss */
+        auth_session_set(NULL);
         memset(token, 0, sizeof(token));
 
         if(!network_is_connected()) {
@@ -464,11 +650,26 @@ static void firebase_auth_listener_task(void *pvParameters) {
     }
 }
 
-
-
-
-
 esp_err_t firebase_start_auth_listener(void) {
+    if(state_queue == NULL) {
+        state_queue = xQueueCreate(STATE_QUEUE_LENGTH, sizeof(fan_speed_t));
+        if(state_queue == NULL) return ESP_ERR_NO_MEM;
+    }
+    if(auth_mutex == NULL) {
+        auth_mutex = xSemaphoreCreateMutex();
+        if(auth_mutex == NULL) return ESP_ERR_NO_MEM;
+    }
+
+    BaseType_t uploader_result = xTaskCreate(
+        firebase_state_uploader_task,
+        "firebase_state",
+        STATE_UPLOAD_TASK_STACK,
+        NULL,
+        4,
+        &state_uploader_handle
+    );
+    if(uploader_result != pdPASS) return ESP_ERR_NO_MEM;
+
     BaseType_t result = xTaskCreate(
         firebase_auth_listener_task,
         "firebase_sse",
