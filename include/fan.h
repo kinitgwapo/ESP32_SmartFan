@@ -26,4 +26,7 @@ void fan_task(void *pvParameters);
 /* Submit a validated remote command to fan_task */
 esp_err_t fan_command_submit(const fan_command_t *command);
 
+/* Return the currently applied fan speed */
+fan_speed_t fan_get_speed(void);
+
 #endif /* FAN_H */

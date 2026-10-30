@@ -1,5 +1,6 @@
 #include "fan.h"
 #include "network_provision.h"
+#include "firebase.h"
 
 #include <stdbool.h>
 
@@ -38,6 +39,10 @@ typedef struct {
 
 QueueHandle_t fan_command_queue = NULL;
 
+/* fan_task owns the applied state; other tasks read it via fan_get_speed() */
+static fan_speed_t current_speed = FAN_OFF;
+static portMUX_TYPE fan_state_mux = portMUX_INITIALIZER_UNLOCKED;
+
 static debounced_input_t inputs[FAN_SPEED_COUNT] = {
     [FAN_OFF]    = { INPUT_OFF,    true, 0 },
     [FAN_LOW]    = { INPUT_LOW,    true, 0 },
@@ -74,10 +79,36 @@ static bool debounce_update(debounced_input_t *input)
 /* Turn all outputs off first, then the selected one on (break before make). */
 static void fan_set_speed(fan_speed_t speed)
 {
+    if(speed < FAN_OFF || speed >= FAN_SPEED_COUNT) return;
+
+    /* Do not generate reports for redundant selections */
+    portENTER_CRITICAL(&fan_state_mux);
+    bool changed = (speed != current_speed);
+    portEXIT_CRITICAL(&fan_state_mux);
+
+    if(!changed) return;
+
+    /* Break-before-make output transition */
     for (int i = 0; i < FAN_SPEED_COUNT; i++) {
         gpio_set_level(output_pins[i], 0);
     }
     gpio_set_level(output_pins[speed], 1);
+
+    portENTER_CRITICAL(&fan_state_mux);
+    current_speed = speed;
+    portEXIT_CRITICAL(&fan_state_mux);
+
+    /* Reporting is asynchronous; fan control never waits for HTTP */
+    firebase_state_changed(speed);
+}
+
+fan_speed_t fan_get_speed(void)
+{
+    fan_speed_t speed;
+    portENTER_CRITICAL(&fan_state_mux);
+    speed = current_speed;
+    portEXIT_CRITICAL(&fan_state_mux);
+    return speed;
 }
 
 void fan_init(void)
@@ -110,7 +141,13 @@ void fan_init(void)
     ESP_ERROR_CHECK(gpio_config(&input_cfg));
     ESP_ERROR_CHECK(gpio_config(&output_cfg));
 
-    fan_set_speed(FAN_OFF);
+    for(int i = 0; i < FAN_SPEED_COUNT; i++) {
+        gpio_set_level(output_pins[i], 0);
+    }
+    gpio_set_level(output_pins[FAN_OFF], 1);
+    portENTER_CRITICAL(&fan_state_mux);
+    current_speed = FAN_OFF;
+    portEXIT_CRITICAL(&fan_state_mux);
 }
 
 esp_err_t fan_command_submit(const fan_command_t *command)
