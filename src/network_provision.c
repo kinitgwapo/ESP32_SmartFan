@@ -12,11 +12,14 @@
 #include "freertos/task.h"
 
 #include "esp_err.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+
 #include "esp_event.h"
 #include "esp_http_server.h"
-#include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+
 #include "nvs_flash.h"
 
 #define AP_NAME                  "ESP32-Device"
@@ -26,6 +29,10 @@
 #define EVENT_WIFI_CONNECTED     BIT0
 #define EVENT_WIFI_DISCONNECTED  BIT1
 #define EVENT_STA_CONFIGURED     BIT2
+#define EVENT_WIFI_RECONNECT_REQUEST BIT3
+
+#define WIFI_RECONNECT_WINDOW_MS 30000
+#define WIFI_RECONNECT_INTERVAL_MS 3000
 
 #define WIFI_CONFIG_QUEUE_LENGTH 1
 #define WIFI_FORM_BUFFER_SIZE    384
@@ -35,6 +42,12 @@ static const char *TAG = "Wi-Fi";
 static EventGroupHandle_t wifi_event_group;
 static QueueHandle_t wifi_config_queue;
 static httpd_handle_t http_server;
+
+static bool reconnect_active = false;
+static bool reconnect_exhausted = false;
+
+static int64_t reconnect_deadline_us = 0;
+static int64_t next_reconnect_us = 0;
 
 static void wifi_event_handler(void *arg,
                                esp_event_base_t event_base,
@@ -227,35 +240,48 @@ static void wifi_event_handler(void *arg,
                                int32_t event_id,
                                void *event_data)
 {
-    switch (event_id) {
-    case WIFI_EVENT_STA_START:
-        if ((xEventGroupGetBits(wifi_event_group) &
-             EVENT_STA_CONFIGURED) != 0) {
-            esp_err_t err = esp_wifi_connect();
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Initial connect request failed: %s",
-                         esp_err_to_name(err));
+    if (event_base == WIFI_EVENT) {
+        switch (event_id) {
+        case WIFI_EVENT_STA_START:
+            if ((xEventGroupGetBits(wifi_event_group) & EVENT_STA_CONFIGURED) != 0) {
+                xEventGroupSetBits(
+                    wifi_event_group,
+                    EVENT_WIFI_RECONNECT_REQUEST
+                );
             }
+            break;
+        case WIFI_EVENT_STA_DISCONNECTED:
+            xEventGroupClearBits(
+                wifi_event_group,
+                EVENT_WIFI_CONNECTED
+            );
+
+            xEventGroupSetBits(
+                wifi_event_group,
+                EVENT_WIFI_DISCONNECTED
+            );
+            ESP_LOGW(TAG, "Wi-Fi disconnected");
+
+            break;
+        default:
+            break;
         }
-        break;
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
 
-    case WIFI_EVENT_STA_DISCONNECTED:
-        xEventGroupClearBits(wifi_event_group, EVENT_WIFI_CONNECTED);
-        xEventGroupSetBits(wifi_event_group, EVENT_WIFI_DISCONNECTED);
-        ESP_LOGW(TAG, "Router Wi-Fi disconnected; setup portal remains available");
-        /* No automatic retry loop: reconfigure from the setup page. */
-        break;
+        ESP_LOGI(TAG,
+                 "Wi-Fi connected. IP: " IPSTR,
+                 IP2STR(&event->ip_info.ip));
 
-    case WIFI_EVENT_AP_STACONNECTED:
-        ESP_LOGI(TAG, "A client connected to %s", AP_NAME);
-        break;
+        xEventGroupClearBits(
+            wifi_event_group,
+            EVENT_WIFI_DISCONNECTED
+        );
 
-    case WIFI_EVENT_AP_STADISCONNECTED:
-        ESP_LOGI(TAG, "A client disconnected from %s", AP_NAME);
-        break;
-
-    default:
-        break;
+        xEventGroupSetBits(
+            wifi_event_group,
+            EVENT_WIFI_CONNECTED
+        );
     }
 }
 
@@ -278,38 +304,47 @@ static void ip_event_handler(void *arg,
 
 static void apply_station_config(wifi_config_t *config)
 {
-    /* Disconnect the old station connection/attempt before changing config. */
-    xEventGroupClearBits(wifi_event_group,
-                         EVENT_WIFI_CONNECTED | EVENT_WIFI_DISCONNECTED);
+    reconnect_active = false;
+    reconnect_exhausted = false;
+
+    xEventGroupClearBits(
+        wifi_event_group,
+        EVENT_WIFI_CONNECTED |
+        EVENT_WIFI_DISCONNECTED |
+        EVENT_WIFI_RECONNECT_REQUEST
+    );
 
     esp_err_t err = esp_wifi_disconnect();
     if (err == ESP_OK) {
-        /* Only this network task waits; local control tasks are unaffected. */
-        (void)xEventGroupWaitBits(
+        xEventGroupWaitBits(
             wifi_event_group,
             EVENT_WIFI_DISCONNECTED,
             pdTRUE,
-            pdTRUE,
+            pdFALSE,
             pdMS_TO_TICKS(2000)
         );
     }
 
     err = esp_wifi_set_config(WIFI_IF_STA, config);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Could not save Wi-Fi configuration: %s",
+        ESP_LOGE(TAG,
+                 "Failed to apply Wi-Fi configuration: %s",
                  esp_err_to_name(err));
         return;
     }
 
-    xEventGroupSetBits(wifi_event_group, EVENT_STA_CONFIGURED);
-    ESP_LOGI(TAG, "Applying new Wi-Fi configuration for SSID: %.32s",
-             (const char *)config->sta.ssid);
+    xEventGroupSetBits(
+        wifi_event_group,
+        EVENT_STA_CONFIGURED
+    );
+    ESP_LOGI(TAG,
+             "Wi-Fi configuration applied for SSID: %s",
+             (char *)config->sta.ssid);
 
-    err = esp_wifi_connect();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Connection request was not accepted: %s",
-                 esp_err_to_name(err));
-    }
+    xEventGroupSetBits(
+        wifi_event_group,
+        EVENT_WIFI_RECONNECT_REQUEST
+    );
 }
 
 void network_init(void)
@@ -404,6 +439,7 @@ void network_init(void)
     ESP_LOGI(TAG, "Connect to %s and open http://192.168.4.1/", AP_NAME);
 }
 
+
 void network_task(void *pvParameters)
 {
     (void)pvParameters;
@@ -411,23 +447,109 @@ void network_task(void *pvParameters)
     network_init();
 
     for (;;) {
-        /*
-         * Process configuration requests submitted by the browser.
-         * The wait is confined to this task, not the fan/sensor tasks.
-         */
         wifi_config_t requested_config;
-        if (xQueueReceive(wifi_config_queue,
-                          &requested_config,
-                          pdMS_TO_TICKS(500)) == pdTRUE) {
+
+        if (xQueueReceive(
+                wifi_config_queue,
+                &requested_config,
+                pdMS_TO_TICKS(250)) == pdTRUE) {
+
             apply_station_config(&requested_config);
         }
 
         EventBits_t bits = xEventGroupGetBits(wifi_event_group);
-        if ((bits & EVENT_WIFI_DISCONNECTED) != 0) {
-            xEventGroupClearBits(wifi_event_group,
-                                 EVENT_WIFI_DISCONNECTED);
-            ESP_LOGW(TAG,
-                     "Wi-Fi is offline. Reconfigure at http://192.168.4.1/");
+        if (bits & EVENT_WIFI_RECONNECT_REQUEST) {
+            xEventGroupClearBits(wifi_event_group, EVENT_WIFI_RECONNECT_REQUEST);
+
+            reconnect_active = false;
+            reconnect_exhausted = false;
+
+            if (!(xEventGroupGetBits(wifi_event_group) & EVENT_WIFI_CONNECTED)) {
+                reconnect_active = true;
+                int64_t now_us = esp_timer_get_time();
+
+                reconnect_deadline_us = now_us + ((int64_t)WIFI_RECONNECT_WINDOW_MS * 1000);
+
+                esp_err_t err = esp_wifi_connect();
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG,
+                             "Initial reconnect request failed: %s",
+                             esp_err_to_name(err));
+                }
+
+                next_reconnect_us = now_us + ((int64_t)WIFI_RECONNECT_INTERVAL_MS * 1000);
+                ESP_LOGI(TAG,
+                         "Wi-Fi reconnect window started: %d seconds",
+                         WIFI_RECONNECT_WINDOW_MS / 1000);
+            }
+        }
+
+        bits = xEventGroupGetBits(wifi_event_group);
+        if (bits & EVENT_WIFI_DISCONNECTED) {
+            xEventGroupClearBits(
+                wifi_event_group,
+                EVENT_WIFI_DISCONNECTED
+            );
+
+            if (!reconnect_active && !reconnect_exhausted) {
+                reconnect_active = true;
+                int64_t now_us = esp_timer_get_time();
+                reconnect_deadline_us = now_us + ((int64_t)WIFI_RECONNECT_WINDOW_MS * 1000);
+
+                esp_err_t err = esp_wifi_connect();
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG,
+                             "Reconnect request failed: %s",
+                             esp_err_to_name(err));
+                }
+
+                next_reconnect_us = now_us + ((int64_t)WIFI_RECONNECT_INTERVAL_MS * 1000);
+
+                ESP_LOGW(TAG, "Wi-Fi reconnect window started");
+            }
+        }
+
+        bits = xEventGroupGetBits(wifi_event_group);
+        if (bits & EVENT_WIFI_CONNECTED) {
+            if (reconnect_active || reconnect_exhausted) {
+                ESP_LOGI(TAG, "Wi-Fi restored; reconnect cycle stopped");
+            }
+            reconnect_active = false;
+            reconnect_exhausted = false;
+
+            continue;
+        }
+        if (reconnect_active) {
+            int64_t now_us = esp_timer_get_time();
+
+            if (now_us >= reconnect_deadline_us) {
+                reconnect_active = false;
+                reconnect_exhausted = true;
+
+                ESP_LOGW(TAG,
+                         "Automatic Wi-Fi reconnect stopped "
+                         "after %d seconds",
+                         WIFI_RECONNECT_WINDOW_MS / 1000);
+
+                ESP_LOGW(TAG,
+                         "Please configure Wi-Fi through "
+                         "http://192.168.4.1/");
+
+                continue;
+            }
+
+            if (now_us >= next_reconnect_us) {
+                ESP_LOGI(TAG, "Attempting Wi-Fi reconnect");
+
+                esp_err_t err = esp_wifi_connect();
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG,
+                             "Reconnect request failed: %s",
+                             esp_err_to_name(err));
+                }
+
+                next_reconnect_us = now_us + ((int64_t)WIFI_RECONNECT_INTERVAL_MS * 1000);
+            }
         }
     }
 }
